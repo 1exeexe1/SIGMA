@@ -88,8 +88,8 @@
 --           on the watched player leaving. Lives in TCO tab.
 --    New:   Chat Spy upgraded with IQ + muted role labels (ported from
 --           tco-main). getChatMeta() now classifies: peasant / admin /
---           arken / hidden / iqgenius / iqdumb. IQ≥200 = genius 🧠,
---           IQ≤50 = dumb 🤪. Prefix icon added per class. Muted tag
+--           arken / hidden / iqgenius / iqdumb. IQ≥200 = genius \240\159\167\160,
+--           IQ≤50 = dumb \240\159\164\170. Prefix icon added per class. Muted tag
 --           checked via HasTag. Fully backwards-compatible with existing
 --           SpyChat toggle + Bot Replier.
 --    New:   Clone Tool mode added to Construction Tool virtual dispatch.
@@ -279,7 +279,7 @@
 --  Rules 1-5 cause nil crashes on load. Rules 6-7 cause bugs or regressions.
 --
 -- ── DO NOT MODIFY (TIMING / PROTOCOL CRITICAL) ───────────────
---  HANDSHAKE = "both 🤝"   server expects this exact string
+--  HANDSHAKE = "both \240\159\164\157"   server expects this exact string
 --  BUILD_SETTLE = 0.18      empirically tuned; don't lower
 --  BUILD_VERIFY_WAIT = 0.35 empirically tuned
 --  CT_GRID = 4              game expects 4-stud grid
@@ -9676,7 +9676,7 @@ do
     end)
 
     -- ── Instant fun buttons (no delay, fire-and-forget coroutines) ────────
-    makeButton(g, "🌈  Instant Rainbow (scope)", function()
+    makeButton(g, "\240\159\140\136  Instant Rainbow (scope)", function()
         if _cpPainting then notify("Sigma","Stop current paint first."); return end
         local pb = _cpGetBucket()
         if not pb then notify("Sigma","PaintBucket not found!"); return end
@@ -10218,8 +10218,8 @@ do
                 local iqSuffix=""
                 local iq=plr:GetAttribute("IQ")
                 if type(iq)=="number" then
-                    if     iq>=200 then cn="iqgenius"; iqSuffix=" \240\159\167\160"  -- 🧠 
-                    elseif iq<=50  then cn="iqdumb";   iqSuffix=" \240\159\164\170"  -- 🤪
+                    if     iq>=200 then cn="iqgenius"; iqSuffix=" \240\159\167\160"  -- \240\159\167\160 
+                    elseif iq<=50  then cn="iqdumb";   iqSuffix=" \240\159\164\170"  -- \240\159\164\170
                     end
                 end
                 local hex=CHAT_ROLE_COLORS[cn] or "#ffffff"
@@ -10475,7 +10475,7 @@ end
 
 do
     local g=makeGroup(tcoPage,"Server","Server connection utilities.")
-    makeButton(g,"🔄 Rejoin",function()
+    makeButton(g,"\240\159\148\132 Rejoin",function()
         prepareKeep()  -- arm queue_on_teleport BEFORE the teleport fires (Dev Rule: always prepareKeep before any TeleportService call)
         pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp)
@@ -11181,7 +11181,7 @@ local function makeRadOverlay(titleText, totalSteps, stoppedRef)
     tipLbl.TextColor3 = Color3.fromRGB(195, 195, 195)
     tipLbl.TextXAlignment = Enum.TextXAlignment.Left
     tipLbl.TextWrapped = true
-    tipLbl.Text = "💡 " .. RAD_TIPS[math.random(1, #RAD_TIPS)]
+    tipLbl.Text = "\240\159\146\161 " .. RAD_TIPS[math.random(1, #RAD_TIPS)]
     tipLbl.Parent = frame
 
     local barBg = Instance.new("Frame")
@@ -11226,7 +11226,7 @@ local function makeRadOverlay(titleText, totalSteps, stoppedRef)
             task.wait(4.5)
             tipIdx = (tipIdx % #RAD_TIPS) + 1
             if tipLbl and tipLbl.Parent then
-                tipLbl.Text = "💡 " .. RAD_TIPS[tipIdx]
+                tipLbl.Text = "\240\159\146\161 " .. RAD_TIPS[tipIdx]
             end
         end
     end)
@@ -13055,7 +13055,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     lbl.Size                 = UDim2.new(1,-4,0,18)
     lbl.Position             = UDim2.new(0,2,0,2)
     lbl.BackgroundTransparency=1
-    lbl.Text                 = "🎵 "..name.." · "..id
+    lbl.Text                 = "\240\159\142\181 "..name.." · "..id
     lbl.TextColor3           = Color3.fromRGB(255,220,80)
     lbl.FontFace             = FONT_MAIN
     lbl.TextSize             = 11
@@ -13081,7 +13081,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     muteBtn.Position         = UDim2.new(1,-56,0.5,-13)
     muteBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
     muteBtn.BorderSizePixel  = 0
-    muteBtn.Text             = "🔊"
+    muteBtn.Text             = "\240\159\148\138"
     muteBtn.TextSize         = 14
     muteBtn.FontFace         = FONT_MAIN
     muteBtn.TextColor3       = Color3.fromRGB(255,255,255)
@@ -13090,14 +13090,14 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     muteBtn.Parent           = bg
 
     local muted = S._boomboxMuted[char] or false
-    if muted then muteBtn.Text="🔇"; sound.Volume=0 end
+    if muted then muteBtn.Text="\240\159\148\135"; sound.Volume=0 end
     muteBtn.MouseButton1Click:Connect(function()
         muted = not muted
         S._boomboxMuted[char] = muted
         if muted then
-            muteBtn.Text="🔇"; sound.Volume=0
+            muteBtn.Text="\240\159\148\135"; sound.Volume=0
         else
-            muteBtn.Text="🔊"; sound.Volume=1
+            muteBtn.Text="\240\159\148\138"; sound.Volume=1
         end
     end)
 
@@ -13108,7 +13108,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     copyBtn.Position         = UDim2.new(1,-28,0.5,-13)
     copyBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
     copyBtn.BorderSizePixel  = 0
-    copyBtn.Text             = "📋"
+    copyBtn.Text             = "\240\159\147\139"
     copyBtn.TextSize         = 14
     copyBtn.FontFace         = FONT_MAIN
     copyBtn.TextColor3       = Color3.fromRGB(255,255,255)
@@ -13119,7 +13119,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     copyBtn.MouseButton1Click:Connect(function()
         local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
         if clip then pcall(function() clip(id) end) end
-        copyBtn.Text="✓"; task.delay(1.2, function() if copyBtn and copyBtn.Parent then copyBtn.Text="📋" end end)
+        copyBtn.Text="✓"; task.delay(1.2, function() if copyBtn and copyBtn.Parent then copyBtn.Text="\240\159\147\139" end end)
         notify("Boombox", "Copied ID: "..id)
     end)
 
@@ -13416,7 +13416,7 @@ do
         local bg = bb and bb:FindFirstChildWhichIsA("Frame")
         if bg then
             local mb = bg:FindFirstChild("MuteBtn")
-            if mb then mb.Text = muted and "🔇" or "🔊" end
+            if mb then mb.Text = muted and "\240\159\148\135" or "\240\159\148\138" end
         end
         notify("Boombox", (muted and "Muted: " or "Unmuted: ")..char.Name)
     end)
@@ -13528,7 +13528,7 @@ do
                 l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left
                 l.TextTruncate=Enum.TextTruncate.AtEnd; l.ZIndex=53
             end
-            rowLbl("🎵 "..e.name, Color3.fromRGB(255,220,80))
+            rowLbl("\240\159\142\181 "..e.name, Color3.fromRGB(255,220,80))
             rowLbl("ID: "..e.id.."  ⏱ "..e.dur, Color3.fromRGB(180,180,200))
             rowLbl("Owner: "..e.owner, Color3.fromRGB(140,200,140))
 
@@ -13541,12 +13541,12 @@ do
             btnLayout.FillDirection = Enum.FillDirection.Horizontal
             btnLayout.Padding = UDim.new(0,3)
 
-            -- 📋 Copy ID
+            -- \240\159\147\139 Copy ID
             local cpBtn = Instance.new("TextButton", btnRow)
             cpBtn.Size = UDim2.new(0,70,1,0)
             cpBtn.BackgroundColor3 = Color3.fromRGB(40,40,55)
             cpBtn.BorderColor3 = T.BORDER
-            cpBtn.Text = "📋 Copy"
+            cpBtn.Text = "\240\159\147\139 Copy"
             cpBtn.TextColor3 = T.WHITE
             cpBtn.FontFace = FONT_MAIN; cpBtn.TextSize = 10
             cpBtn.ZIndex = 54
@@ -13555,12 +13555,12 @@ do
                 cpBtn.MouseButton1Click:Connect(function()
                     local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
                     if clip then pcall(function() clip(eid) end) end
-                    cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="📋 Copy" end end)
+                    cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="\240\159\147\139 Copy" end end)
                     notify("Boombox Log","Copied ID: "..eid)
                 end)
             end
 
-            -- 🔊 Mute (toggles S._boomboxMuted for the logged char)
+            -- \240\159\148\138 Mute (toggles S._boomboxMuted for the logged char)
             local muBtn = Instance.new("TextButton", btnRow)
             muBtn.Size = UDim2.new(0,60,1,0)
             muBtn.BackgroundColor3 = Color3.fromRGB(40,40,55)
@@ -13573,7 +13573,7 @@ do
                 local echar = e.char
                 local function refreshMuteLabel()
                     local muted = echar and S._boomboxMuted[echar]
-                    muBtn.Text = muted and "🔇 Muted" or "🔊 Mute"
+                    muBtn.Text = muted and "\240\159\148\135 Muted" or "\240\159\148\138 Mute"
                     muBtn.BackgroundColor3 = muted and Color3.fromRGB(80,30,30) or Color3.fromRGB(40,40,55)
                 end
                 refreshMuteLabel()
@@ -13594,7 +13594,7 @@ do
                             end
                         end
                     end)
-                    if mb then mb.Text = muted and "🔇" or "🔊" end
+                    if mb then mb.Text = muted and "\240\159\148\135" or "\240\159\148\138" end
                     refreshMuteLabel()
                 end)
             end
@@ -13620,7 +13620,7 @@ do
         tb.BorderSizePixel=0; tb.ZIndex=51
         local tl=Instance.new("TextLabel",tb)
         tl.Size=UDim2.new(1,-26,1,0); tl.Position=UDim2.new(0,6,0,0)
-        tl.BackgroundTransparency=1; tl.Text="🎵 Boombox ID Logger"
+        tl.BackgroundTransparency=1; tl.Text="\240\159\142\181 Boombox ID Logger"
         tl.TextColor3=T.ACCENT; tl.FontFace=FONT_MAIN; tl.TextSize=11
         tl.TextXAlignment=Enum.TextXAlignment.Left; tl.ZIndex=52
         onTheme(function(th) tl.TextColor3=th.ACCENT end)
@@ -14021,7 +14021,7 @@ local function _dcLogRebuildRows()
             l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left
             l.TextTruncate=Enum.TextTruncate.AtEnd; l.ZIndex=53
         end
-        rowLbl("🖼 "..e.name, Color3.fromRGB(200,180,255))
+        rowLbl("\240\159\150\188 "..e.name, Color3.fromRGB(200,180,255))
         rowLbl("ID: "..e.id.."  ["..e.kind.."]", Color3.fromRGB(180,180,200))
         rowLbl("Owner: "..e.owner, Color3.fromRGB(140,200,140))
 
@@ -14033,23 +14033,23 @@ local function _dcLogRebuildRows()
         btnLayout.FillDirection = Enum.FillDirection.Horizontal
         btnLayout.Padding = UDim.new(0,3)
 
-        -- 📋 Copy ID
+        -- \240\159\147\139 Copy ID
         local cpBtn = Instance.new("TextButton", btnRow)
         cpBtn.Size = UDim2.new(0,70,1,0)
         cpBtn.BackgroundColor3 = Color3.fromRGB(40,40,55); cpBtn.BorderColor3 = T.BORDER
-        cpBtn.Text = "📋 Copy"; cpBtn.TextColor3 = T.WHITE
+        cpBtn.Text = "\240\159\147\139 Copy"; cpBtn.TextColor3 = T.WHITE
         cpBtn.FontFace = FONT_MAIN; cpBtn.TextSize = 10; cpBtn.ZIndex = 54
         onTheme(function(th) cpBtn.BorderColor3=th.BORDER; cpBtn.TextColor3=th.WHITE end)
         do local eid = e.id
             cpBtn.MouseButton1Click:Connect(function()
                 local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
                 if clip then pcall(function() clip(eid) end) end
-                cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="📋 Copy" end end)
+                cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="\240\159\147\139 Copy" end end)
                 notify("Decal Log","Copied ID: "..eid)
             end)
         end
 
-        -- 🚫 Toggle Censor (adds/removes from S._decalBlacklist)
+        -- \240\159\154\171 Toggle Censor (adds/removes from S._decalBlacklist)
         local csBtn = Instance.new("TextButton", btnRow)
         csBtn.Size = UDim2.new(0,80,1,0)
         csBtn.BorderColor3 = T.BORDER
@@ -14059,7 +14059,7 @@ local function _dcLogRebuildRows()
             local eid = e.id
             local function refreshCsBtn()
                 local censored = S._decalBlacklist[eid]
-                csBtn.Text = censored and "✅ Uncensor" or "🚫 Censor"
+                csBtn.Text = censored and "✅ Uncensor" or "\240\159\154\171 Censor"
                 csBtn.BackgroundColor3 = censored and Color3.fromRGB(30,55,30) or Color3.fromRGB(55,30,30)
                 csBtn.TextColor3 = censored and Color3.fromRGB(120,220,120) or Color3.fromRGB(220,100,100)
             end
@@ -14096,7 +14096,7 @@ local function _dcLogBuildPanel()
     tb.BorderSizePixel=0; tb.ZIndex=51
     local tl=Instance.new("TextLabel",tb)
     tl.Size=UDim2.new(1,-26,1,0); tl.Position=UDim2.new(0,6,0,0)
-    tl.BackgroundTransparency=1; tl.Text="🖼 Decal ID Logger"
+    tl.BackgroundTransparency=1; tl.Text="\240\159\150\188 Decal ID Logger"
     tl.TextColor3=T.ACCENT; tl.FontFace=FONT_MAIN; tl.TextSize=11
     tl.TextXAlignment=Enum.TextXAlignment.Left; tl.ZIndex=52
     onTheme(function(th) tl.TextColor3=th.ACCENT end)
@@ -14408,7 +14408,7 @@ local function nanoAct(brick)
             ev:FireServer(brick,Enum.NormalId.Top,hrp.Position,"color",col,"plastic","")
         end
     elseif S.nanoMode=="Materialize" then
-        -- Apply both color and material at once with HANDSHAKE ("both 🤝").
+        -- Apply both color and material at once with HANDSHAKE ("both \240\159\164\157").
         local ev=equipAndGetEvent("Paint"); if ev then
             local col=S.nanoMatColor
             if S.nanoMatRainbow then S.nanoMatRainbowH=(S.nanoMatRainbowH+0.03)%1; col=Color3.fromHSV(S.nanoMatRainbowH,1,1) end
@@ -15783,7 +15783,7 @@ do
     info.AutomaticSize=Enum.AutomaticSize.Y; info.BackgroundTransparency=1
     info.TextWrapped=true; info.ZIndex=8; info.Parent=g
     info.Text=[[
-🛠  v4.7.2 — QoL + Multi-Chat Edition
+\240\159\155\160  v4.7.2 — QoL + Multi-Chat Edition
 Lead: 8363hls (rnexeexe)
 
 Whitelisted: masxteng3 · casen62
