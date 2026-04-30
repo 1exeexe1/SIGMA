@@ -566,15 +566,6 @@ end
 --   _getPreviewOffset()          — return S._previewOffset (Vector3)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-S.livePreview        = false
-S.movePreview        = false
-S._livePreviewParts  = {}
-S._livePreviewAnchor = nil
-S._previewAnchor     = nil   -- alias kept in sync by _spawnLivePreview/_clearLivePreview
-S._previewOffset     = Vector3.new(0,0,0)
-S._previewHandles    = nil
-S._previewGenTag     = nil
-
 local function _clearLivePreview()
     -- Destroy move handles first
     if S._previewHandles then
@@ -1029,6 +1020,15 @@ local S = {
     multiChatCount    = 1,      -- how many extra bars (1–4)
     radCoreBrick  = nil,   -- BasePart | nil  — core brick after Brick->Core step (debug inspection)
     radWarheadPos = nil,   -- Vector3 | nil   — warhead cluster center after Core->Warhead step (debug inspection)
+    -- ── Live Preview ───────────────────────────────────────────────────────────────────────────────────
+    livePreview        = false,
+    movePreview        = false,
+    _livePreviewParts  = {},
+    _livePreviewAnchor = nil,
+    _previewAnchor     = nil,
+    _previewOffset     = Vector3.new(0,0,0),
+    _previewHandles    = nil,
+    _previewGenTag     = nil,
 }
 
 -- ── SHARED BRIDGE ────────────────────────────────────────────
