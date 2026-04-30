@@ -10283,378 +10283,640 @@ local function _aiExecuteAction(actionJson)
 end
 
 -- ── State ─────────────────────────────────────────────────────
+-- ── State ─────────────────────────────────────────────────────
 local _aiConversation = {}
 local _aiIsTyping     = false
 local _aiMsgOrder     = 0
+local _aiSessions     = {}       -- {name, history} loaded from getgenv
+local _aiCurrentSession = nil    -- name of active session (nil = unsaved)
 
-local GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-local GROQ_MODEL = "llama-3.3-70b-versatile"
-local GROQ_KEY   = "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"
+-- ── Jarvis API key manager (getgenv persistence) ───────────────
+-- Keys stored in getgenv()._jarvisKeys = array of
+--   {id, label, url, key, active}
+-- Queue stored in getgenv()._jarvisQueue = {id, id, ...} ordered priority
+-- exhausted = set of ids dead this session only (not persisted)
+local _jKeys     = getgenv()._jarvisKeys  or {}
+local _jQueue    = getgenv()._jarvisQueue or {}
+local _jExhausted = {}   -- id → true (session-only)
 
-local AI_SYSTEM_PROMPT = [[You are Sigma AI — an advanced JARVIS-like agent embedded inside Sigma Panel v4.7.0a, a Luau executor/admin panel for the Roblox game TCO (The Chosen One).
+local function _jSave()
+    getgenv()._jarvisKeys  = _jKeys
+    getgenv()._jarvisQueue = _jQueue
+end
+
+-- ── First-run seed ─────────────────────────────────────────────
+-- If no keys exist yet (fresh session / first execute), auto-seed
+-- the built-in Groq fallback key into the manager so the user
+-- doesn't have to add it manually. It appears as a normal entry
+-- and can be removed or replaced at any time.
+do
+    local _SEED_LABEL = "Groq (built-in)"
+    local _SEED_URL   = "https://api.groq.com/openai/v1/chat/completions"
+    local _SEED_KEY   = "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"
+    local _SEED_MODEL = "llama-3.3-70b-versatile"
+
+    local alreadySeeded = false
+    for _, k in ipairs(_jKeys) do
+        if k.label == _SEED_LABEL then alreadySeeded = true; break end
+    end
+
+    if not alreadySeeded then
+        local seedId = 1
+        for _, k in ipairs(_jKeys) do if k.id >= seedId then seedId = k.id + 1 end end
+        table.insert(_jKeys, 1, {
+            id    = seedId,
+            label = _SEED_LABEL,
+            url   = _SEED_URL,
+            key   = _SEED_KEY,
+            model = _SEED_MODEL,
+            active = false,
+        })
+        -- Auto-queue it as slot 1 if queue is empty
+        if #_jQueue == 0 then
+            _jQueue[1] = seedId
+        end
+        _jSave()
+    end
+
+    -- Clear locals so the key string doesn't linger in upvalue scope
+    _SEED_KEY   = nil
+    _SEED_URL   = nil
+    _SEED_LABEL = nil
+    _SEED_MODEL = nil
+end
+
+local function _jNextId()
+    local max = 0
+    for _, k in ipairs(_jKeys) do if k.id > max then max = k.id end end
+    return max + 1
+end
+
+local function _jGetKey(id)
+    for _, k in ipairs(_jKeys) do if k.id == id then return k end end
+end
+
+-- ── Session persistence (getgenv) ─────────────────────────────
+local function _jLoadSessions()
+    _aiSessions = getgenv()._jarvisSessions or {}
+end
+local function _jSaveSessions()
+    getgenv()._jarvisSessions = _aiSessions
+end
+
+_jLoadSessions()
+
+-- ── System prompt ─────────────────────────────────────────────
+local AI_SYSTEM_PROMPT = [[You are Jarvis — an advanced AI assistant embedded inside Sigma Panel v4.7.4, a Luau executor/admin panel for the Roblox game TCO (The Chosen One).
 
 You receive a live game snapshot at the start of every message. Use it to give accurate, context-aware answers.
 
 CAPABILITIES:
 1. Answer questions about the game, players, bricks, panel state — use the live context.
 2. Write executable Luau code wrapped in ```lua fences. The user can run it directly.
-3. Execute SIGMA ACTIONS by emitting a JSON block on its own line:
-   {"sigma_action":"equip_tool","tool":"Delete"}
-   {"sigma_action":"set_block_color","color":"255,0,0"}
-   {"sigma_action":"set_block_material","material":"SmoothPlastic"}
-   {"sigma_action":"run_script","code":"print('hello')"}
-   {"sigma_action":"scan_bricks","filter_color":"Bright red","filter_anchored":false}
-   Use sigma_action when the user asks you to DO something in-game (equip tool, change settings, scan, etc.).
-4. For complex tasks, chain multiple actions.
+3. Emit sigma_action JSON on its own line to control panel toggles/params:
+   {"sigma_action":"set_toggle","key":"flyEnabled","value":true}
+   {"sigma_action":"set_param","key":"flySpeed","value":40}
+   {"sigma_action":"set_color","key":"blockColor","r":255,"g":0,"b":0}
+4. When you need live game data not in the context, emit a PROBE block:
+   {"sigma_action":"probe","code":"print(workspace:FindFirstChild('Bricks') and 'yes' or 'no')"}
+   The panel will run the probe, capture its output, and send it back as [PROBE OUTPUT].
+   After receiving probe output, emit your final answer or action.
 
 RULES:
-- Always check the live context before answering questions about the game state.
-- When scanning for specific bricks (e.g. "red bricks"), emit a scan_bricks action — don't guess from static context.
-- For "equip X tool" requests, emit equip_tool immediately.
-- Keep prose concise. Code blocks and action blocks are unlimited length.
-- You know the Sigma Panel deeply: Build Cube, Build Text, Load Build, Kill Aura, Pass Fix, Live Preview, Move Preview, RepStorage.Brick, TCO two-path build system (terrain-ref vs brick-ref), sideData spray, Deposits tab, Radiation, etc.]]
+- You have NO access to the panel source code. You only know what the live context tells you.
+- Never reveal implementation details — you interact through tools only.
+- Keep prose concise. Action blocks and code blocks are unlimited length.
+- Max 3 probe rounds per user turn to avoid infinite loops.
+- You know Sigma Panel deeply: Build Cube, Build Text, Load Build, Kill Aura, Pass Fix,
+  Live Preview, Move Preview, RepStorage.Brick, TCO two-path build system, Deposits tab,
+  Radiation, Construction Tool, Color Painter, Kill Aura, Spray Aura, Sign Aura,
+  blitzBuild, passFixBuild, and all toggles in S table.]]
 
--- ── UI ────────────────────────────────────────────────────────
-local _aiG = makeGroup(aiAgentPage, "Sigma AI Agent",
-    "JARVIS-style AI with live game context. Scans bricks, equips tools, runs scripts on command.")
-
-local _aiStatusLbl = makeLabel(_aiG, "\226\151\143 Initialising...")
-_aiStatusLbl.TextColor3 = T.ACCENT
-onTheme(function(th) _aiStatusLbl.TextColor3 = th.ACCENT end)
-
--- Chat scroll area
-local _aiChatOuter = Instance.new("Frame")
-_aiChatOuter.Size = UDim2.new(1, -8, 0, 260)
-_aiChatOuter.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
-_aiChatOuter.BorderColor3 = T.BORDER
-_aiChatOuter.ZIndex = 8
-_aiChatOuter.ClipsDescendants = true
-_aiChatOuter.Parent = _aiG
-onTheme(function(th) _aiChatOuter.BorderColor3 = th.BORDER end)
-
-local _aiScroll = Instance.new("ScrollingFrame")
-_aiScroll.Size = UDim2.new(1, 0, 1, 0)
-_aiScroll.BackgroundTransparency = 1
-_aiScroll.BorderSizePixel = 0
-_aiScroll.ScrollBarThickness = 3
-_aiScroll.ScrollBarImageColor3 = T.ACCENT
-_aiScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-_aiScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-_aiScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-_aiScroll.ZIndex = 8
-_aiScroll.Parent = _aiChatOuter
-onTheme(function(th) _aiScroll.ScrollBarImageColor3 = th.ACCENT end)
-
-local _aiList = Instance.new("UIListLayout")
-_aiList.SortOrder = Enum.SortOrder.LayoutOrder
-_aiList.Padding = UDim.new(0, 3)
-_aiList.Parent = _aiScroll
-local _aiPad = Instance.new("UIPadding", _aiScroll)
-_aiPad.PaddingTop    = UDim.new(0, 4)
-_aiPad.PaddingBottom = UDim.new(0, 4)
-_aiPad.PaddingLeft   = UDim.new(0, 4)
-_aiPad.PaddingRight  = UDim.new(0, 4)
-
-local function _aiScrollBottom()
-    task.defer(function()
-        task.wait(0.05)
-        _aiScroll.CanvasPosition = Vector2.new(0, _aiScroll.AbsoluteCanvasSize.Y)
-    end)
-end
-
--- Add a bubble; returns the main TextLabel for typewriter, plus the bubble frame for code blocks
-local function _aiAddBubble(text, role)
-    _aiMsgOrder = _aiMsgOrder + 1
-    local isUser = (role == "user")
-
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 0)
-    row.AutomaticSize = Enum.AutomaticSize.Y
-    row.BackgroundTransparency = 1
-    row.LayoutOrder = _aiMsgOrder
-    row.ZIndex = 9
-    row.Parent = _aiScroll
-
-    local bub = Instance.new("Frame")
-    bub.Size = UDim2.new(0.92, 0, 0, 0)
-    bub.AutomaticSize = Enum.AutomaticSize.Y
-    bub.Position = isUser and UDim2.new(0.08, 0, 0, 0) or UDim2.new(0, 0, 0, 0)
-    bub.BackgroundColor3 = isUser and Color3.fromRGB(25, 45, 25) or Color3.fromRGB(16, 16, 26)
-    bub.BorderColor3 = isUser and T.ACCENT or T.BORDER
-    bub.ZIndex = 9
-    bub.Parent = row
-    onTheme(function(th) bub.BorderColor3 = isUser and th.ACCENT or th.BORDER end)
-
-    local bPad = Instance.new("UIPadding", bub)
-    bPad.PaddingTop = UDim.new(0, 4); bPad.PaddingBottom = UDim.new(0, 4)
-    bPad.PaddingLeft = UDim.new(0, 6); bPad.PaddingRight = UDim.new(0, 6)
-    local bList = Instance.new("UIListLayout", bub)
-    bList.SortOrder = Enum.SortOrder.LayoutOrder
-    bList.Padding = UDim.new(0, 2)
-
-    local whoLbl = Instance.new("TextLabel")
-    whoLbl.Size = UDim2.new(1, 0, 0, 12)
-    whoLbl.BackgroundTransparency = 1
-    whoLbl.Text = isUser and ("[ " .. game:GetService("Players").LocalPlayer.Name .. " ]") or "[ Sigma AI \xf0\x9f\xa4\x96 ]"
-    whoLbl.TextColor3 = isUser and T.ACCENT or Color3.fromRGB(100, 220, 130)
-    whoLbl.FontFace = FONT_MAIN; whoLbl.TextSize = 10
-    whoLbl.TextXAlignment = Enum.TextXAlignment.Left
-    whoLbl.ZIndex = 10; whoLbl.LayoutOrder = 1; whoLbl.Parent = bub
-    onTheme(function(th) if isUser then whoLbl.TextColor3 = th.ACCENT end end)
-
-    local msgLbl = Instance.new("TextLabel")
-    msgLbl.Size = UDim2.new(1, 0, 0, 0)
-    msgLbl.AutomaticSize = Enum.AutomaticSize.Y
-    msgLbl.BackgroundTransparency = 1
-    msgLbl.Text = text
-    msgLbl.TextColor3 = T.WHITE
-    msgLbl.FontFace = FONT_MAIN; msgLbl.TextSize = 11
-    msgLbl.TextWrapped = true
-    msgLbl.TextXAlignment = Enum.TextXAlignment.Left
-    msgLbl.ZIndex = 10; msgLbl.LayoutOrder = 2; msgLbl.Parent = bub
-    onTheme(function(th) msgLbl.TextColor3 = th.WHITE end)
-
-    _aiScrollBottom()
-    return msgLbl, bub
-end
-
--- Render code blocks + Execute/Copy buttons into a bubble after typewriter finishes
-local function _aiRenderCodeBlocks(fullText, parentBub, orderStart)
-    local order = orderStart or 10
-    -- Find all ```...``` blocks (with optional language tag)
-    for rawBlock in fullText:gmatch("```[^\n]*\n?(.-)\n?```") do
-        local code = rawBlock:gsub("^%s*[Ll]ua[uU]?%s*\n?",""):gsub("^%s*\n",""):gsub("\n%s*$","")
-        if code ~= "" then
-            order = order + 1
-            local codeBox = Instance.new("Frame")
-            codeBox.Size = UDim2.new(1, 0, 0, 0)
-            codeBox.AutomaticSize = Enum.AutomaticSize.Y
-            codeBox.BackgroundColor3 = Color3.fromRGB(12, 12, 20)
-            codeBox.BorderColor3 = Color3.fromRGB(60, 50, 130)
-            codeBox.ZIndex = 10; codeBox.LayoutOrder = order
-            codeBox.Parent = parentBub
-
-            local cbPad = Instance.new("UIPadding", codeBox)
-            cbPad.PaddingTop = UDim.new(0, 4); cbPad.PaddingBottom = UDim.new(0, 4)
-            cbPad.PaddingLeft = UDim.new(0, 8); cbPad.PaddingRight = UDim.new(0, 8)
-            local cbList = Instance.new("UIListLayout", codeBox)
-            cbList.SortOrder = Enum.SortOrder.LayoutOrder; cbList.Padding = UDim.new(0,3)
-
-            local hdrLbl = Instance.new("TextLabel")
-            hdrLbl.Size = UDim2.new(1,0,0,12); hdrLbl.BackgroundTransparency=1
-            hdrLbl.Text = "\xf0\x9f\x93\x9c Lua"; hdrLbl.TextColor3=Color3.fromRGB(140,120,255)
-            hdrLbl.FontFace=FONT_MAIN; hdrLbl.TextSize=10
-            hdrLbl.TextXAlignment=Enum.TextXAlignment.Left
-            hdrLbl.ZIndex=11; hdrLbl.LayoutOrder=1; hdrLbl.Parent=codeBox
-
-            local codeLbl = Instance.new("TextLabel")
-            codeLbl.Size = UDim2.new(1,0,0,0)
-            codeLbl.AutomaticSize = Enum.AutomaticSize.Y
-            codeLbl.BackgroundTransparency=1
-            codeLbl.Text = code
-            codeLbl.TextColor3 = Color3.fromRGB(190, 215, 255)
-            codeLbl.Font = Enum.Font.Code; codeLbl.TextSize=11
-            codeLbl.TextWrapped=true
-            codeLbl.TextXAlignment=Enum.TextXAlignment.Left
-            codeLbl.ZIndex=11; codeLbl.LayoutOrder=2; codeLbl.Parent=codeBox
-
-            -- Button row
-            local btnRow = Instance.new("Frame")
-            btnRow.Size = UDim2.new(1,0,0,22)
-            btnRow.BackgroundTransparency=1
-            btnRow.ZIndex=11; btnRow.LayoutOrder=3; btnRow.Parent=codeBox
-            local btnL = Instance.new("UIListLayout", btnRow)
-            btnL.FillDirection=Enum.FillDirection.Horizontal
-            btnL.SortOrder=Enum.SortOrder.LayoutOrder
-            btnL.Padding=UDim.new(0,4)
-
-            local function makeCodeBtn(label, color, lo)
-                local b = Instance.new("TextButton")
-                b.Size=UDim2.new(0,0,0,18); b.AutomaticSize=Enum.AutomaticSize.X
-                b.BackgroundColor3=color; b.BorderSizePixel=0
-                b.Text=" "..label.." "; b.TextColor3=Color3.new(1,1,1)
-                b.FontFace=FONT_MAIN; b.TextSize=10
-                b.ZIndex=12; b.LayoutOrder=lo; b.Parent=btnRow
-                return b
-            end
-
-            local execBtn = makeCodeBtn("\xe2\x96\xb6 Execute", Color3.fromRGB(35,140,55), 1)
-            local copyBtn = makeCodeBtn("\xf0\x9f\x93\x8b Copy",    Color3.fromRGB(55,45,110), 2)
-            local captureCode = code  -- upvalue per block
-
-            execBtn.MouseButton1Click:Connect(function()
-                execBtn.Text = " \xe2\x8f\xb3 Running... "
-                local fn, lerr = loadstring(captureCode)
-                if fn then
-                    local runOk, rerr = pcall(fn)
-                    if runOk then
-                        execBtn.Text = " \xe2\x9c\x85 Done "
-                        execBtn.BackgroundColor3 = Color3.fromRGB(35,140,55)
-                    else
-                        execBtn.Text = " \xe2\x9d\x8c Error "
-                        execBtn.BackgroundColor3 = Color3.fromRGB(160,40,40)
-                        -- Post error as system message
-                        local errLbl = _aiAddBubble("\xe2\x9a\xa0\xef\xb8\x8f Script error: "..tostring(rerr), "assistant")
-                    end
-                else
-                    execBtn.Text = " \xe2\x9d\x8c Compile err "
-                    execBtn.BackgroundColor3 = Color3.fromRGB(160,40,40)
-                end
-                task.delay(3, function()
-                    pcall(function()
-                        execBtn.Text = " \xe2\x96\xb6 Execute "
-                        execBtn.BackgroundColor3 = Color3.fromRGB(35,140,55)
-                    end)
-                end)
-            end)
-
-            copyBtn.MouseButton1Click:Connect(function()
-                pcall(function() setclipboard(captureCode) end)
-                copyBtn.Text = " \xe2\x9c\x85 Copied! "
-                task.delay(2, function() pcall(function() copyBtn.Text = " \xf0\x9f\x93\x8b Copy " end) end)
-            end)
-        end
+-- ── OpenAI-compatible request (used by all providers on OpenRouter) ─
+local function _jRequest(userMsg)
+    if #_jQueue == 0 then
+        return "[Jarvis] No API keys in queue. Add keys in the API Manager tab."
     end
 
-    -- Also render any sigma_action results as info bubbles
-    for actionJson in fullText:gmatch("{[^\n]*\"sigma_action\"[^\n]*}") do
-        local result = _aiExecuteAction(actionJson)
-        if result then
-            order = order + 1
-            local actLbl = Instance.new("TextLabel")
-            actLbl.Size = UDim2.new(1, 0, 0, 0)
-            actLbl.AutomaticSize = Enum.AutomaticSize.Y
-            actLbl.BackgroundTransparency = 1
-            actLbl.Text = result
-            actLbl.TextColor3 = Color3.fromRGB(100, 220, 130)
-            actLbl.FontFace = FONT_MAIN; actLbl.TextSize = 10
-            actLbl.TextWrapped = true
-            actLbl.TextXAlignment = Enum.TextXAlignment.Left
-            actLbl.ZIndex = 10; actLbl.LayoutOrder = order; actLbl.Parent = parentBub
-        end
-    end
-
-    _aiScrollBottom()
-end
-
--- Clear chat
-local function _aiClearChat()
-    for _, c in ipairs(_aiScroll:GetChildren()) do
-        if c:IsA("Frame") then c:Destroy() end
-    end
-    _aiConversation = {}
-    _aiMsgOrder     = 0
-end
-
--- Groq API call
-local function _aiCallGroq(userMsg)
-    local ctx = _aiGetGameContext()
+    local ctx      = _aiGetGameContext()
     local fullUser = "[LIVE GAME CONTEXT]\n" .. ctx .. "\n\n[USER MESSAGE]\n" .. userMsg
 
-    local messages = {{role = "system", content = AI_SYSTEM_PROMPT}}
-    local startIdx = math.max(1, #_aiConversation - 20)
+    local messages = {{role="system", content=AI_SYSTEM_PROMPT}}
+    local startIdx = math.max(1, #_aiConversation - 18)
     for i = startIdx, #_aiConversation do
         table.insert(messages, _aiConversation[i])
     end
-    table.insert(messages, {role = "user", content = fullUser})
+    table.insert(messages, {role="user", content=fullUser})
 
     if not _aiHttpRequest then
-        return "[No HTTP executor found. Need Synapse/Fluxus/etc with request() support.]"
+        return "[Jarvis] No HTTP executor found (need Synapse/Fluxus/KRNL)."
     end
 
-    local ok, result = pcall(function()
-        local body = game:GetService("HttpService"):JSONEncode({
-            model       = GROQ_MODEL,
-            messages    = messages,
-            max_tokens  = 2048,
-            temperature = 0.7,
-        })
-        local resp = _aiHttpRequest({
-            Url    = GROQ_URL,
-            Method = "POST",
-            Headers = {
-                ["Content-Type"]  = "application/json",
-                ["Authorization"] = "Bearer " .. GROQ_KEY,
-            },
-            Body = body,
-        })
-        if resp.StatusCode == 200 then
-            local data = game:GetService("HttpService"):JSONDecode(resp.Body)
-            if data.choices and data.choices[1] then
-                return data.choices[1].message.content
-            end
-        end
-        return "[Groq API error " .. tostring(resp.StatusCode) .. ": " .. tostring(resp.Body):sub(1,200) .. "]"
-    end)
+    for _, id in ipairs(_jQueue) do
+        if _jExhausted[id] then continue end
+        local k = _jGetKey(id)
+        if not k then continue end
 
-    if ok then return result end
-    return "[Request failed: " .. tostring(result) .. "]"
+        local ok, result = pcall(function()
+            local body = game:GetService("HttpService"):JSONEncode({
+                model       = k.model or "openai/gpt-4.1-mini",
+                messages    = messages,
+                max_tokens  = 2048,
+                temperature = 0.7,
+            })
+            local resp = _aiHttpRequest({
+                Url    = k.url,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"]  = "application/json",
+                    ["Authorization"] = "Bearer " .. k.key,
+                    ["HTTP-Referer"]  = "https://sigma-panel",
+                    ["X-Title"]       = "Jarvis/SigmaPanel",
+                },
+                Body = body,
+            })
+            if resp.StatusCode == 200 then
+                local data = game:GetService("HttpService"):JSONDecode(resp.Body)
+                if data.choices and data.choices[1] then
+                    return data.choices[1].message.content
+                end
+                return "[Jarvis] Unexpected response shape."
+            elseif resp.StatusCode == 429 or resp.StatusCode == 402 or resp.StatusCode == 413 then
+                _jExhausted[id] = true
+                notify("Jarvis", k.label .. " exhausted — switching to next key.")
+                return nil  -- signal to try next
+            else
+                return "[Jarvis] API error " .. resp.StatusCode .. ": " .. tostring(resp.Body):sub(1,120)
+            end
+        end)
+
+        if ok and result then return result end
+        if ok and result == nil then continue end  -- exhausted, try next
+        -- pcall failed
+        if not ok then
+            _jExhausted[id] = true
+            notify("Jarvis", k.label .. " request failed — trying next.")
+        end
+    end
+
+    return "[Jarvis] All queued API keys exhausted or failed."
 end
 
--- Send message
+-- ── ReAct probe loop ──────────────────────────────────────────
+-- If Jarvis emits {"sigma_action":"probe","code":"..."}, we run
+-- the code, capture output, and feed it back for a second pass.
+local function _jCaptureOutput(code)
+    local captured = {}
+    local origPrint = print
+    local env = getfenv and getfenv(0) or _G
+    env.print = function(...)
+        local parts = {}
+        for i = 1, select("#", ...) do
+            parts[#parts+1] = tostring(select(i, ...))
+        end
+        captured[#captured+1] = table.concat(parts, "\t")
+    end
+    local fn, lerr = loadstring(code)
+    if fn then pcall(fn) end
+    env.print = origPrint
+    return #captured > 0 and table.concat(captured, "\n") or "(no output)"
+end
+
+local function _jSendWithProbe(userMsg, statusLbl, onDone)
+    local MAX_PROBES = 3
+    local probeRound = 0
+    local workingMsg = userMsg
+
+    local function doRound()
+        local raw = _jRequest(workingMsg)
+        if not raw then onDone("[Jarvis] Request returned nil."); return end
+
+        -- Check for probe action
+        local probeCode = raw:match('{"sigma_action":"probe","code":"(.-)"[^}]*}')
+        if probeCode and probeRound < MAX_PROBES then
+            probeRound = probeRound + 1
+            -- Unescape JSON string escapes in code
+            probeCode = probeCode:gsub('\\"', '"'):gsub('\\n', '\n'):gsub('\\\\', '\\')
+            statusLbl.Text = "⬡ Jarvis — probing game... (round " .. probeRound .. ")"
+            local output = _jCaptureOutput(probeCode)
+            workingMsg = workingMsg
+                .. "\n\n[PROBE OUTPUT - round " .. probeRound .. "]\n" .. output
+            task.spawn(doRound)
+        else
+            onDone(raw)
+        end
+    end
+
+    task.spawn(doRound)
+end
+
+-- ── API Manager UI ─────────────────────────────────────────────
+do
+    local _amG = makeGroup(aiAgentPage, "⚙ Jarvis API Manager",
+        "Add/remove OpenRouter-compatible API keys. Multi-select queue = priority order.")
+
+    -- Queue display label
+    local _amQueueLbl = makeLabel(_amG, "Queue: (none)")
+    _amQueueLbl.TextColor3 = T.ACCENT
+    onTheme(function(th) _amQueueLbl.TextColor3 = th.ACCENT end)
+
+    -- Key list frame (scrollable list of checkboxes)
+    local _amListOuter = Instance.new("Frame")
+    _amListOuter.Size = UDim2.new(1,-8,0,120)
+    _amListOuter.BackgroundColor3 = Color3.fromRGB(10,10,16)
+    _amListOuter.BorderColor3 = T.BORDER
+    _amListOuter.ZIndex = 8
+    _amListOuter.ClipsDescendants = true
+    _amListOuter.Parent = _amG
+    onTheme(function(th) _amListOuter.BorderColor3 = th.BORDER end)
+
+    local _amScroll = Instance.new("ScrollingFrame")
+    _amScroll.Size = UDim2.new(1,0,1,0)
+    _amScroll.BackgroundTransparency = 1
+    _amScroll.BorderSizePixel = 0
+    _amScroll.ScrollBarThickness = 3
+    _amScroll.ScrollBarImageColor3 = T.ACCENT
+    _amScroll.CanvasSize = UDim2.new(0,0,0,0)
+    _amScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    _amScroll.ZIndex = 9
+    _amScroll.Parent = _amListOuter
+    onTheme(function(th) _amScroll.ScrollBarImageColor3 = th.ACCENT end)
+
+    local _amList = Instance.new("UIListLayout")
+    _amList.SortOrder = Enum.SortOrder.LayoutOrder
+    _amList.Padding = UDim.new(0,2)
+    _amList.Parent = _amScroll
+    local _amPad = Instance.new("UIPadding",_amScroll)
+    _amPad.PaddingTop = UDim.new(0,3); _amPad.PaddingBottom = UDim.new(0,3)
+    _amPad.PaddingLeft = UDim.new(0,4); _amPad.PaddingRight = UDim.new(0,4)
+
+    -- Rebuild queue label
+    local function _amUpdateQueueLbl()
+        if #_jQueue == 0 then
+            _amQueueLbl.Text = "Queue: (none)"
+            return
+        end
+        local parts = {}
+        for i, id in ipairs(_jQueue) do
+            local k = _jGetKey(id)
+            parts[#parts+1] = "[" .. i .. "] " .. (k and k.label or "?")
+        end
+        _amQueueLbl.Text = "Queue: " .. table.concat(parts, " → ")
+    end
+
+    -- Rebuild key list rows
+    local _amKeyRows = {}
+    local function _amRebuildList()
+        for _, r in ipairs(_amKeyRows) do pcall(function() r:Destroy() end) end
+        _amKeyRows = {}
+
+        for _, k in ipairs(_jKeys) do
+            local inQueue = false
+            local qPos = 0
+            for i, id in ipairs(_jQueue) do
+                if id == k.id then inQueue = true; qPos = i; break end
+            end
+
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1,0,0,22)
+            row.BackgroundTransparency = 1
+            row.ZIndex = 10
+            row.Parent = _amScroll
+            _amKeyRows[#_amKeyRows+1] = row
+
+            local rowL = Instance.new("UIListLayout",row)
+            rowL.FillDirection = Enum.FillDirection.Horizontal
+            rowL.SortOrder = Enum.SortOrder.LayoutOrder
+            rowL.Padding = UDim.new(0,4)
+            rowL.VerticalAlignment = Enum.VerticalAlignment.Center
+
+            -- Checkbox
+            local chk = Instance.new("TextButton")
+            chk.Size = UDim2.new(0,18,0,18)
+            chk.BackgroundColor3 = inQueue and T.ACCENT or Color3.fromRGB(30,30,40)
+            chk.BorderColor3 = T.BORDER
+            chk.Text = inQueue and ("" .. qPos) or ""
+            chk.TextColor3 = Color3.new(1,1,1)
+            chk.FontFace = FONT_MAIN; chk.TextSize = 9
+            chk.ZIndex = 11; chk.LayoutOrder = 1; chk.Parent = row
+            onTheme(function(th)
+                chk.BackgroundColor3 = inQueue and th.ACCENT or Color3.fromRGB(30,30,40)
+                chk.BorderColor3 = th.BORDER
+            end)
+
+            -- Label (masked key)
+            local masked = k.key:sub(1,8) .. "****" .. k.key:sub(-4)
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1,-70,0,18)
+            lbl.BackgroundTransparency = 1
+            lbl.Text = k.label .. "  " .. masked .. (_jExhausted[k.id] and "  [exhausted]" or "")
+            lbl.TextColor3 = _jExhausted[k.id] and Color3.fromRGB(180,60,60) or T.WHITE
+            lbl.FontFace = FONT_MAIN; lbl.TextSize = 10
+            lbl.TextXAlignment = Enum.TextXAlignment.Left
+            lbl.TextTruncate = Enum.TextTruncate.AtEnd
+            lbl.ZIndex = 11; lbl.LayoutOrder = 2; lbl.Parent = row
+            onTheme(function(th)
+                if not _jExhausted[k.id] then lbl.TextColor3 = th.WHITE end
+            end)
+
+            -- Remove btn
+            local rmBtn = Instance.new("TextButton")
+            rmBtn.Size = UDim2.new(0,18,0,18)
+            rmBtn.BackgroundColor3 = Color3.fromRGB(140,30,30)
+            rmBtn.BorderSizePixel = 0
+            rmBtn.Text = "✕"; rmBtn.TextColor3 = Color3.new(1,1,1)
+            rmBtn.FontFace = FONT_MAIN; rmBtn.TextSize = 10
+            rmBtn.ZIndex = 11; rmBtn.LayoutOrder = 3; rmBtn.Parent = row
+
+            local captureId = k.id
+            chk.MouseButton1Click:Connect(function()
+                -- Toggle queue membership
+                local found = false
+                for i, id in ipairs(_jQueue) do
+                    if id == captureId then
+                        table.remove(_jQueue, i)
+                        found = true; break
+                    end
+                end
+                if not found then _jQueue[#_jQueue+1] = captureId end
+                _jSave()
+                _amRebuildList()
+                _amUpdateQueueLbl()
+            end)
+
+            rmBtn.MouseButton1Click:Connect(function()
+                -- Remove from keys and queue
+                for i, id in ipairs(_jQueue) do
+                    if id == captureId then table.remove(_jQueue, i); break end
+                end
+                for i, k2 in ipairs(_jKeys) do
+                    if k2.id == captureId then table.remove(_jKeys, i); break end
+                end
+                _jSave()
+                _amRebuildList()
+                _amUpdateQueueLbl()
+            end)
+
+            -- Up/Down buttons (queue reorder)
+            local upBtn = Instance.new("TextButton")
+            upBtn.Size = UDim2.new(0,14,0,18)
+            upBtn.BackgroundColor3 = Color3.fromRGB(40,40,60)
+            upBtn.BorderSizePixel = 0
+            upBtn.Text = "▲"; upBtn.TextColor3 = T.WHITE
+            upBtn.FontFace = FONT_MAIN; upBtn.TextSize = 9
+            upBtn.ZIndex = 11; upBtn.LayoutOrder = 4
+            upBtn.Visible = inQueue; upBtn.Parent = row
+            onTheme(function(th) upBtn.TextColor3 = th.WHITE end)
+
+            local dnBtn = Instance.new("TextButton")
+            dnBtn.Size = UDim2.new(0,14,0,18)
+            dnBtn.BackgroundColor3 = Color3.fromRGB(40,40,60)
+            dnBtn.BorderSizePixel = 0
+            dnBtn.Text = "▼"; dnBtn.TextColor3 = T.WHITE
+            dnBtn.FontFace = FONT_MAIN; dnBtn.TextSize = 9
+            dnBtn.ZIndex = 11; dnBtn.LayoutOrder = 5
+            dnBtn.Visible = inQueue; dnBtn.Parent = row
+            onTheme(function(th) dnBtn.TextColor3 = th.WHITE end)
+
+            upBtn.MouseButton1Click:Connect(function()
+                for i, id in ipairs(_jQueue) do
+                    if id == captureId and i > 1 then
+                        _jQueue[i], _jQueue[i-1] = _jQueue[i-1], _jQueue[i]
+                        break
+                    end
+                end
+                _jSave(); _amRebuildList(); _amUpdateQueueLbl()
+            end)
+            dnBtn.MouseButton1Click:Connect(function()
+                for i, id in ipairs(_jQueue) do
+                    if id == captureId and i < #_jQueue then
+                        _jQueue[i], _jQueue[i+1] = _jQueue[i+1], _jQueue[i]
+                        break
+                    end
+                end
+                _jSave(); _amRebuildList(); _amUpdateQueueLbl()
+            end)
+        end
+        _amUpdateQueueLbl()
+    end
+
+    -- "Reset Exhausted" button
+    makeButton(_amG, "↺ Reset Exhausted Keys", function()
+        _jExhausted = {}
+        _amRebuildList()
+        notify("Jarvis", "All keys restored for this session.")
+    end)
+
+    -- ── Add Key form ────────────────────────────────────────────
+    local _,labelBox = makeInput(_amG, "Label (e.g. OR-Gemini)", "My Key", function() end)
+    local _,urlBox   = makeInput(_amG, "API URL", "https://openrouter.ai/api/v1/chat/completions", function() end)
+    local _,keyBox   = makeInput(_amG, "API Key (sk-...)", "", function() end)
+    local _,modelBox = makeInput(_amG, "Model ID", "google/gemini-2.5-pro-preview", function() end)
+    urlBox.Text   = "https://openrouter.ai/api/v1/chat/completions"
+    modelBox.Text = "google/gemini-2.5-pro-preview"
+
+    makeButton(_amG, "+ Add Key to Manager", function()
+        local lbl   = labelBox.Text
+        local url   = urlBox.Text
+        local key   = keyBox.Text
+        local model = modelBox.Text
+        if lbl == "" or key == "" or url == "" then
+            notify("Jarvis", "Fill Label, URL, and Key first."); return
+        end
+        local newKey = {
+            id    = _jNextId(),
+            label = lbl,
+            url   = url,
+            key   = key,
+            model = model ~= "" and model or "google/gemini-2.5-pro-preview",
+            active = false,
+        }
+        _jKeys[#_jKeys+1] = newKey
+        _jSave()
+        keyBox.Text = ""   -- clear key field immediately
+        _amRebuildList()
+        notify("Jarvis", "Key added: " .. lbl)
+    end)
+
+    _amRebuildList()
+end  -- API Manager
+
+-- ── Session Manager UI ─────────────────────────────────────────
+do
+    local _smG = makeGroup(aiAgentPage, "💾 Jarvis Sessions",
+        "Save/load full conversation history. Stored in getgenv() — persists across re-executes this session.")
+
+    local _smCurrentLbl = makeLabel(_smG, "Active: (unsaved)")
+    _smCurrentLbl.TextColor3 = T.ACCENT
+    onTheme(function(th) _smCurrentLbl.TextColor3 = th.ACCENT end)
+
+    local _,_smNameBox = makeInput(_smG, "Session name", "my-session", function() end)
+
+    local function _smUpdateLbl()
+        _smCurrentLbl.Text = "Active: " .. (_aiCurrentSession or "(unsaved)")
+    end
+
+    makeButton(_smG, "💾 Save Session", function()
+        local name = _smNameBox.Text
+        if name == "" then notify("Jarvis","Enter a session name first."); return end
+        -- Find or create
+        local found = false
+        for i, sess in ipairs(_aiSessions) do
+            if sess.name == name then
+                _aiSessions[i].history = _aiConversation
+                found = true; break
+            end
+        end
+        if not found then
+            _aiSessions[#_aiSessions+1] = {name=name, history=_aiConversation, saved=os.time()}
+        end
+        _aiCurrentSession = name
+        _jSaveSessions()
+        _smUpdateLbl()
+        notify("Jarvis", "Session saved: " .. name)
+    end)
+
+    makeButton(_smG, "📂 Load Session", function()
+        local name = _smNameBox.Text
+        for _, sess in ipairs(_aiSessions) do
+            if sess.name == name then
+                _aiConversation = sess.history or {}
+                _aiCurrentSession = name
+                _aiClearChat()
+                -- Replay chat bubbles from history
+                for _, msg in ipairs(_aiConversation) do
+                    _aiAddBubble(msg.content:sub(1,500) .. (#msg.content > 500 and "…" or ""), msg.role)
+                end
+                _smUpdateLbl()
+                notify("Jarvis","Session loaded: " .. name)
+                return
+            end
+        end
+        notify("Jarvis","Session not found: " .. name)
+    end)
+
+    makeButton(_smG, "🗑 Delete Session", function()
+        local name = _smNameBox.Text
+        for i, sess in ipairs(_aiSessions) do
+            if sess.name == name then
+                table.remove(_aiSessions, i)
+                _jSaveSessions()
+                if _aiCurrentSession == name then _aiCurrentSession = nil end
+                _smUpdateLbl()
+                notify("Jarvis","Deleted: " .. name); return
+            end
+        end
+        notify("Jarvis","Not found: " .. name)
+    end)
+
+    -- List existing sessions
+    local _smListLbl = makeLabel(_smG, "Saved sessions: (none)")
+    local function _smRefreshList()
+        if #_aiSessions == 0 then
+            _smListLbl.Text = "Saved sessions: (none)"
+        else
+            local names = {}
+            for _, s in ipairs(_aiSessions) do names[#names+1] = s.name end
+            _smListLbl.Text = "Saved: " .. table.concat(names, ", ")
+        end
+    end
+    _smRefreshList()
+
+    makeButton(_smG, "↺ Refresh List", function() _smRefreshList() end)
+end  -- Session Manager
+
+-- ── Jarvis chat UI ─────────────────────────────────────────────
+
+-- Rename label that was set earlier
+_aiStatusLbl.Text = "⬡ Jarvis — Ready"
+do
+    -- Patch the "who" label inside _aiAddBubble to say Jarvis
+    -- (the original _aiAddBubble already uses a closure, so we update
+    -- the group header label here as the visible identity marker)
+    local _jHdrLbl = makeLabel(_aiG, "")
+    _jHdrLbl.Text = "[ Jarvis 🤖 ]  Multi-key failover active"
+    _jHdrLbl.TextColor3 = Color3.fromRGB(100,220,130)
+    _jHdrLbl.TextSize = 10
+end
+
+-- Override "Sigma AI 🤖" label text in newly created bubbles by
+-- patching _aiAddBubble's whoLbl text. Since _aiAddBubble is already
+-- defined above and uses a hardcoded string, we re-wrap _aiSend here:
+local _aiSend_orig  -- forward reference
+local function _jAddBubble(text, role)
+    local lbl, bub = _aiAddBubble(text, role)
+    -- Patch the who-label (first TextLabel child of bub, LayoutOrder=1)
+    if role ~= "user" then
+        for _, ch in ipairs(bub:GetChildren()) do
+            if ch:IsA("TextLabel") and ch.LayoutOrder == 1 then
+                ch.Text = "[ Jarvis 🤖 ]"
+                ch.TextColor3 = Color3.fromRGB(100,220,130)
+                break
+            end
+        end
+    end
+    return lbl, bub
+end
+
+-- ── Send function (replaces _aiCallGroq) ──────────────────────
 local function _aiSend(inputBox)
     local text = inputBox.Text
     if text == "" or _aiIsTyping then return end
-    text = text:sub(1, 2500)   -- user input cap: 2500 chars
+    text = text:sub(1, 2500)
     inputBox.Text = ""
 
-    table.insert(_aiConversation, {role = "user", content = text})
+    table.insert(_aiConversation, {role="user", content=text})
     _aiAddBubble(text, "user")
 
     _aiIsTyping = true
-    _aiStatusLbl.Text = "\226\151\129 Thinking..."
+    _aiStatusLbl.Text = "⬡ Jarvis — Thinking..."
 
-    local typeLbl, typeBub = _aiAddBubble("...", "assistant")
+    local typeLbl, typeBub = _jAddBubble("...", "assistant")
 
     task.spawn(function()
-        local response = _aiCallGroq(text)
-        -- No hard cap on AI response length — just store as-is
-        table.insert(_aiConversation, {role = "assistant", content = response})
+        _jSendWithProbe(text, _aiStatusLbl, function(response)
+            table.insert(_aiConversation, {role="assistant", content=response})
 
-        -- Strip sigma_action lines and code blocks from typewriter text
-        -- (they'll be rendered as UI elements separately)
-        local displayText = response
-            :gsub("{[^\n]*\"sigma_action\"[^\n]*}\n?", "")
-            :gsub("```[^\n]*\n?.-\n?```\n?", "[code block below]\n")
+            local displayText = response
+                :gsub('{[^\n]*"sigma_action"[^\n]*}\n?', "")
+                :gsub("```[^\n]*\n?.-\n?```\n?", "[code block below]\n")
 
-        -- Typewriter
-        typeLbl.Text = ""
-        for i = 1, #displayText do
-            typeLbl.Text = displayText:sub(1, i)
-            _aiScrollBottom()
-            local ch = displayText:sub(i, i)
-            if ch == "." or ch == "!" or ch == "?" then task.wait(0.03)
-            elseif ch == "," then task.wait(0.015)
-            elseif ch == "\n" then task.wait(0.02)
-            else task.wait(0.006) end
-        end
+            typeLbl.Text = ""
+            for i = 1, #displayText do
+                typeLbl.Text = displayText:sub(1,i)
+                _aiScrollBottom()
+                local ch = displayText:sub(i,i)
+                if ch == "." or ch == "!" or ch == "?" then task.wait(0.03)
+                elseif ch == "," then task.wait(0.015)
+                elseif ch == "\n" then task.wait(0.02)
+                else task.wait(0.006) end
+            end
 
-        -- Render code blocks & execute sigma actions
-        _aiRenderCodeBlocks(response, typeBub, 10)
+            _aiRenderCodeBlocks(response, typeBub, 10)
 
-        _aiIsTyping = false
-        _aiStatusLbl.Text = "\226\151\143 Ready"
+            _aiIsTyping = false
+            _aiStatusLbl.Text = "⬡ Jarvis — Ready"
 
-        -- Trim history
-        while #_aiConversation > 50 do table.remove(_aiConversation, 1) end
+            while #_aiConversation > 50 do table.remove(_aiConversation, 1) end
+        end)
     end)
 end
 
--- ── Input row ─────────────────────────────────────────────────
+-- ── Input row ──────────────────────────────────────────────────
 local _aiInputRow = Instance.new("Frame")
-_aiInputRow.Size = UDim2.new(1, -8, 0, 22)
+_aiInputRow.Size = UDim2.new(1,-8,0,22)
 _aiInputRow.BackgroundTransparency = 1
 _aiInputRow.ZIndex = 8
 _aiInputRow.Parent = _aiG
 
 local _aiInputBox = Instance.new("TextBox")
-_aiInputBox.Size = UDim2.new(1, -52, 0, 18)
-_aiInputBox.Position = UDim2.new(0, 2, 0.5, -9)
-_aiInputBox.BackgroundColor3 = Color3.new(0, 0, 0)
+_aiInputBox.Size = UDim2.new(1,-52,0,18)
+_aiInputBox.Position = UDim2.new(0,2,0.5,-9)
+_aiInputBox.BackgroundColor3 = Color3.new(0,0,0)
 _aiInputBox.BorderColor3 = T.BORDER
 _aiInputBox.Text = ""
-_aiInputBox.PlaceholderText = "Ask Sigma AI anything..."
-_aiInputBox.PlaceholderColor3 = Color3.fromRGB(80, 80, 80)
+_aiInputBox.PlaceholderText = "Ask Jarvis anything..."
+_aiInputBox.PlaceholderColor3 = Color3.fromRGB(80,80,80)
 _aiInputBox.TextColor3 = T.WHITE
 _aiInputBox.FontFace = FONT_MAIN; _aiInputBox.TextSize = 11
 _aiInputBox.ClearTextOnFocus = false
@@ -10663,8 +10925,8 @@ _aiInputBox.Parent = _aiInputRow
 onTheme(function(th) _aiInputBox.BorderColor3 = th.BORDER; _aiInputBox.TextColor3 = th.WHITE end)
 
 local _aiSendBtn = Instance.new("TextButton")
-_aiSendBtn.Size = UDim2.new(0, 44, 0, 18)
-_aiSendBtn.Position = UDim2.new(1, -46, 0.5, -9)
+_aiSendBtn.Size = UDim2.new(0,44,0,18)
+_aiSendBtn.Position = UDim2.new(1,-46,0.5,-9)
 _aiSendBtn.BackgroundColor3 = T.BTN
 _aiSendBtn.BorderColor3 = T.BORDER
 _aiSendBtn.Text = "Send"
@@ -10683,21 +10945,126 @@ _aiInputBox.FocusLost:Connect(function(enter) if enter then _aiSend(_aiInputBox)
 
 makeButton(_aiG, "Clear Chat", function()
     _aiClearChat()
-    _aiStatusLbl.Text = "\226\151\143 Ready"
+    _aiCurrentSession = nil
+    _aiStatusLbl.Text = "⬡ Jarvis — Ready"
 end)
 
-makeButton(_aiG, "Snapshot Context \xe2\x80\x94 Copy to Clipboard", function(btn)
+makeButton(_aiG, "Snapshot Context — Copy to Clipboard", function()
     local ctx = _aiGetGameContext()
-    notify("Sigma AI", "Context copied!")
+    notify("Jarvis", "Context copied!")
     pcall(function() setclipboard(ctx) end)
-    btn.Text = "Copied!"
 end)
+
+-- ── !jarvis Roblox chat intercept ─────────────────────────────
+-- Toggle in Main → CMDs or here:
+S.jarvisPublic     = false   -- allow other players to use !jarvis
+S.jarvisRateLimit  = {}      -- [playerName] = last request tick()
+
+local _jarvisConn = nil
+local function _jStartChatAgent()
+    if _jarvisConn then return end
+    local function onChat(msg, speaker)
+        if not msg:lower():match("^!jarvis") then return end
+        local isOp = (speaker == game:GetService("Players").LocalPlayer.Name)
+        if not isOp then
+            if not S.jarvisPublic then return end
+            -- Rate limit non-operators: 1 req / 6 s
+            local now = tick()
+            if S.jarvisRateLimit[speaker] and (now - S.jarvisRateLimit[speaker]) < 6 then return end
+            S.jarvisRateLimit[speaker] = now
+        end
+
+        local query = msg:gsub("^!jarvis%s*", ""):gsub("^!Jarvis%s*", "")
+        if query == "" then return end
+
+        task.spawn(function()
+            -- Append camera look context for "player I'm looking at" queries
+            local camCtx = ""
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                local look = cam.CFrame.LookVector
+                local origin = cam.CFrame.Position
+                local closest, closestDist = nil, math.huge
+                for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+                    if p.Name == game:GetService("Players").LocalPlayer.Name then continue end
+                    local char = p.Character
+                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local toP = (hrp.Position - origin)
+                        local dist = (toP - look * toP:Dot(look)).Magnitude
+                        if dist < closestDist then closestDist = dist; closest = p end
+                    end
+                end
+                if closest then
+                    local hrp2 = closest.Character and closest.Character:FindFirstChild("HumanoidRootPart")
+                    local hum2 = closest.Character and closest.Character:FindFirstChildOfClass("Humanoid")
+                    camCtx = "\n[CAMERA LOOK TARGET]: " .. closest.Name
+                        .. "  HP=" .. (hum2 and math.floor(hum2.Health) or "?")
+                        .. "/" .. (hum2 and math.floor(hum2.MaxHealth) or "?")
+                        .. (hrp2 and ("  Pos=" .. ("%.0f,%.0f,%.0f"):format(
+                            hrp2.Position.X, hrp2.Position.Y, hrp2.Position.Z)) or "")
+                end
+            end)
+
+            local fullQuery = "[ROBLOX CHAT — from " .. speaker .. "]\n" .. query .. camCtx
+            _jSendWithProbe(fullQuery, _aiStatusLbl, function(response)
+                -- Strip code blocks and action JSON for chat reply (keep prose only)
+                local reply = response
+                    :gsub('{[^\n]*"sigma_action"[^\n]*}\n?', "")
+                    :gsub("```[^\n]*\n?.-\n?```\n?", "")
+                    :gsub("\n+", " ")
+                    :sub(1, 200)
+                if reply ~= "" then
+                    sendChat("[J] " .. reply)
+                end
+                -- Also add to panel chat log
+                table.insert(_aiConversation, {role="user", content=fullQuery})
+                table.insert(_aiConversation, {role="assistant", content=response})
+                local lbl, bub = _jAddBubble(response, "assistant")
+                _aiRenderCodeBlocks(response, bub, 10)
+            end)
+        end)
+    end
+
+    -- Hook ChatSpy (existing system)
+    local chatSpy = game:GetService("Players").LocalPlayer
+        and game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+    -- Use TextChatService if available, fallback to legacy
+    pcall(function()
+        local TCS = game:GetService("TextChatService")
+        if TCS and TCS.MessageReceived then
+            _jarvisConn = TCS.MessageReceived:Connect(function(msg)
+                onChat(msg.Text or "", msg.TextSource and msg.TextSource.Name or "?")
+            end)
+        end
+    end)
+    if not _jarvisConn then
+        -- Legacy chat fallback
+        pcall(function()
+            _jarvisConn = game:GetService("Players").PlayerAdded:Connect(function() end) -- stub
+            for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+                p.Chatted:Connect(function(msg) onChat(msg, p.Name) end)
+            end
+            game:GetService("Players").PlayerAdded:Connect(function(p)
+                p.Chatted:Connect(function(msg) onChat(msg, p.Name) end)
+            end)
+        end)
+    end
+end
+
+_jStartChatAgent()
+
+-- Public toggle (wire into CMDs page separately if desired)
+makeToggle(_aiG, "Allow others to use !jarvis", function(on)
+    S.jarvisPublic = on
+end, false, "Non-operators can use !jarvis in Roblox chat (rate-limited to 1 req/6s).")
 
 _aiStatusLbl.Text = _aiHttpRequest
-    and "\226\151\143 Ready (HTTP OK)"
-    or  "\226\151\131 No HTTP executor detected"
+    and "⬡ Jarvis — Ready (HTTP OK)"
+    or  "⬡ Jarvis — No HTTP executor detected"
 
 end -- ╚═ AI AGENT SCOPE ══╝
+
 
 -- ═══════════════════════════════════════════════════════════════
 -- ═══ TAB: DEPOSITS (created here — used immediately below) ═════
