@@ -413,7 +413,7 @@ end
 --   masxteng3
 --   8363hls
 -- Fallback list is used if the fetch fails.
-local WHITELIST_URL = "https://raw.githubusercontent.com/YOUR_GITHUB/YOUR_REPO/main/whitelist.txt"
+local WHITELIST_URL = "https://raw.githubusercontent.com/potatoesp/stuff/refs/heads/main/whitelist"
 
 local WHITELIST_FALLBACK = {
     ["Nanarain45677"] = true,
