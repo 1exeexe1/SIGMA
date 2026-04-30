@@ -1,9 +1,89 @@
 -- ============================================================
---  SIGMA PANEL  v4.7.2  |  TCO MERGE + QUALITY EDITION
+--  SIGMA PANEL  v4.7.4  |  TCO MERGE + QUALITY EDITION
 -- ============================================================
 --
 -- ── FULL CHANGELOG ───────────────────────────────────────────
---  v4.7.2 [THIS BUILD]
+--  v4.7.4 [THIS BUILD]
+--    New:   Live Preview toggle (Build Cube / Build Text / Load Build).
+--           When ON, a ForceField/box ghost of the build footprint is
+--           kept alive and refreshed any time parameters change (cube
+--           size, text content, load-offset). Preview is destroyed
+--           when the toggle is turned off or when a build fires.
+--           Global state: S.livePreview (bool), S._livePreviewParts
+--           (array of Part instances), S._livePreviewAnchor (single
+--           central Part used as ArcHandles adornee).
+--    New:   Move Preview toggle (Build Cube / Build Text / Load Build).
+--           Requires Live Preview to be active. When ON, attaches a
+--           Handles (Movement style, all 6 faces) to the preview
+--           anchor and wires MouseDrag to translate every preview part
+--           by the same delta. The accumulated offset is stored in
+--           S._previewOffset (Vector3) and is applied to the position
+--           list at build-fire time. Toggle-off hides Handles without
+--           destroying the preview.
+--    Revamp: blitzBuild rewritten as a pure aura-fire loop — no snake
+--           sort, no yield-per-N. Fires every position in the cluster
+--           at full Luau speed (no task.wait inside the hot loop).
+--           blitzBuildChaos updated accordingly: Wave 1 calls new
+--           blitzBuild directly (no sleep), verify once after
+--           BUILD_VERIFY_WAIT, then re-fire only holes in subsequent
+--           waves. Net effect: cluster completion time drops from
+--           ~1 s/cluster to ~0.1 s/cluster for typical 27-brick cubes.
+--
+--  v4.7.3 [PREVIOUS BUILD]
+--    Fix:   Phase 2 shaped-brick builder: face-attach anchor size
+--           now uses anchorMeta.targetSize instead of anchorPart.Size
+--           for the faceCenter calculation. anchorPart.Size is the
+--           server-replicated value and can lag by one frame when the
+--           anchor was just shaped in the previous iteration, producing
+--           a wrong face-center and placing the new brick at the wrong
+--           position. targetSize is always authoritative and never stale.
+--    Fix:   Phase 2 shaped-brick builder: after lastBuilt fires via
+--           ChildAdded, wait SHAPE_WAIT before reading part.Size so the
+--           server's inherited size (copied from the anchor via face-
+--           attach) has time to replicate. Then skip applyShapeOps
+--           entirely when the inherited size already matches the target
+--           within 0.49 studs on every axis. Previously, reading the
+--           stale 4×4×4 default caused the full reshape to fire on every
+--           wall brick (e.g. 4,1,4 → 4,4,2 repeated for the entire wall)
+--           even though the anchor was already the correct size and the
+--           server would have spawned the brick at 4,4,2. The skip is
+--           logged as "Size already correct — shaping skipped."
+--    New:   Phase 2 pass E — two-tier shape fix system:
+--           Tier 1 (ROLLING, woven into D loop): every 10 bricks placed,
+--           re-verify the last 10 builtPart entries immediately while
+--           still mid-build. Mismatched bricks are teleported to and
+--           re-shaped shrink-first. Missing bricks are recovered via
+--           face-attach off the nearest live placed brick, settled
+--           (SHAPE_WAIT), then shaped to target. Logged as ROLL@N.
+--           Catches dropouts before downstream bricks chain off a broken
+--           anchor, preventing cascade failures in dense shaped grids.
+--           Tier 2 (FULL SWEEPS, after D loop): up to 5 convergence
+--           sweeps over all N shaped bricks. Size mismatch → teleport +
+--           shrink-first applyShapeOps. Missing → face-attach recovery
+--           via shared rebuildMissingBrick() (uses bestFace dot-product
+--           selection, ChildAdded watcher rebuildConn). Stops early once
+--           a full sweep produces zero fixes or recoveries.
+--    Fix:   Face-attach (buildEv on a BasePart anchor) is infinite-range
+--           — the server's brick-to-brick build path has no proximity
+--           check. Removed all teleport+Anchored sequences that preceded
+--           face-attach FireServer calls (rolling-check recovery and
+--           rebuildMissingBrick). Teleports are kept exclusively for
+--           Shape remote calls (applyShapeOps callers), which ARE
+--           range-checked server-side. Each recovery now teleports only
+--           AFTER the new brick arrives, right before applyShapeOps.
+--           Strategy B/C terrain builds keep their teleports (Terrain
+--           builds ARE range-checked). Strategy A was already clean.
+--    New:   Debug → BlitzBuild Speed Test redesigned: schedule now starts
+--           at 20 bps and steps +3 per cube (20, 23, 26…47) instead of
+--           the old 2→20 bps warm-up. Tracks wall-clock time per cube
+--           (tick() delta from first FireServer to last hole resolved),
+--           fix-pass count, and first-pass miss count per cube. Prints a
+--           final aligned comparison table (Cube | BPS | Time | Passes |
+--           1st Misses) plus a trend line identifying the first BPS where
+--           fix passes were needed. btn label updates per-cube and during
+--           each fix pass to show live progress.
+--
+--  v4.7.2 [PREVIOUS BUILD]
 --    New:   Multi-Chat — Toggle "Enable Multi-Chat" + "+1–+4"
 --           dropdown in Main → Main → Misc. Spawns up to 4
 --           extra chat input bars (Chat2–Chat5) above the
@@ -88,8 +168,8 @@
 --           on the watched player leaving. Lives in TCO tab.
 --    New:   Chat Spy upgraded with IQ + muted role labels (ported from
 --           tco-main). getChatMeta() now classifies: peasant / admin /
---           arken / hidden / iqgenius / iqdumb. IQ≥200 = genius \240\159\167\160,
---           IQ≤50 = dumb \240\159\164\170. Prefix icon added per class. Muted tag
+--           arken / hidden / iqgenius / iqdumb. IQ≥200 = genius 🧠,
+--           IQ≤50 = dumb 🤪. Prefix icon added per class. Muted tag
 --           checked via HasTag. Fully backwards-compatible with existing
 --           SpyChat toggle + Bot Replier.
 --    New:   Clone Tool mode added to Construction Tool virtual dispatch.
@@ -279,7 +359,7 @@
 --  Rules 1-5 cause nil crashes on load. Rules 6-7 cause bugs or regressions.
 --
 -- ── DO NOT MODIFY (TIMING / PROTOCOL CRITICAL) ───────────────
---  HANDSHAKE = "both \240\159\164\157"   server expects this exact string
+--  HANDSHAKE = "both 🤝"   server expects this exact string
 --  BUILD_SETTLE = 0.18      empirically tuned; don't lower
 --  BUILD_VERIFY_WAIT = 0.35 empirically tuned
 --  CT_GRID = 4              game expects 4-stud grid
@@ -470,6 +550,137 @@ local function makePreviewBox(origin, sX, sY, sZ, grid)
     end
     return parts
 end
+-- ═══ LIVE PREVIEW + MOVE PREVIEW SYSTEM (v4.7.4) ═══════════════════════════
+-- S.livePreview        (bool)    — Live Preview toggle state
+-- S.movePreview        (bool)    — Move Preview toggle state
+-- S._livePreviewParts  (array)   — currently live ForceField/edge Parts
+-- S._livePreviewAnchor (Part)    — invisible anchor at preview centre (Handles adornee)
+-- S._previewOffset     (Vector3) — cumulative drag offset applied at build time
+-- S._previewHandles    (Handles) — movement handles instance (Move Preview)
+-- S._previewGenTag     (string)  — "cube"/"text"/"load" — last preview type
+--
+-- Public API used by Build Cube, Build Text, Load Build:
+--   _clearLivePreview()          — destroy all preview parts + handles
+--   _spawnLivePreview(parts, anchorPos)
+--                                — replace live preview with new parts list
+--   _getPreviewOffset()          — return S._previewOffset (Vector3)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+S.livePreview        = false
+S.movePreview        = false
+S._livePreviewParts  = {}
+S._livePreviewAnchor = nil
+S._previewAnchor     = nil   -- alias kept in sync by _spawnLivePreview/_clearLivePreview
+S._previewOffset     = Vector3.new(0,0,0)
+S._previewHandles    = nil
+S._previewGenTag     = nil
+
+local function _clearLivePreview()
+    -- Destroy move handles first
+    if S._previewHandles then
+        pcall(function() S._previewHandles:Destroy() end)
+        S._previewHandles = nil
+    end
+    -- Destroy all preview geometry
+    for _, p in ipairs(S._livePreviewParts) do
+        pcall(function() p:Destroy() end)
+    end
+    S._livePreviewParts = {}
+    -- Destroy anchor
+    if S._livePreviewAnchor then
+        pcall(function() S._livePreviewAnchor:Destroy() end)
+        S._livePreviewAnchor = nil
+    end
+    S._previewAnchor = nil   -- keep alias in sync
+    S._previewOffset = Vector3.new(0,0,0)
+end
+
+local function _attachMoveHandles()
+    if not S._previewAnchor then return end
+    if S._previewHandles then
+        pcall(function() S._previewHandles:Destroy() end)
+        S._previewHandles = nil
+    end
+    local h = Instance.new("Handles")
+    h.Style  = Enum.HandlesStyle.Movement
+    h.Faces  = Faces.new(
+        Enum.NormalId.Top, Enum.NormalId.Bottom,
+        Enum.NormalId.Front, Enum.NormalId.Back,
+        Enum.NormalId.Left,  Enum.NormalId.Right
+    )
+    h.Adornee = S._previewAnchor
+    h.Parent  = workspace
+    S._previewHandles = h
+
+    -- MouseDrag: translate every preview part + the anchor by the drag delta
+    h.MouseDrag:Connect(function(face, distance)
+        if not S.movePreview or not S.livePreview then return end
+        local faceVec = CT_NORM_VEC[face] or Vector3.new(0,0,0)
+        local delta   = faceVec * distance
+
+        -- Move anchor
+        if S._previewAnchor and S._previewAnchor.Parent then
+            S._previewAnchor.CFrame = S._previewAnchor.CFrame + delta
+        end
+        -- Move all preview parts
+        for _, p in ipairs(S._livePreviewParts) do
+            if p and p.Parent then
+                p.CFrame = p.CFrame + delta
+            end
+        end
+        -- Accumulate offset for build-time application
+        S._previewOffset = S._previewOffset + delta
+    end)
+end
+
+local function _spawnLivePreview(parts, anchorPos)
+    -- Tear down previous preview
+    _clearLivePreview()
+
+    S._livePreviewParts = parts or {}
+
+    -- Create invisible anchor at the geometric centre of the preview
+    local anchor = Instance.new("Part")
+    anchor.Size         = Vector3.new(1,1,1)
+    anchor.CFrame       = CFrame.new(anchorPos or Vector3.new(0,0,0))
+    anchor.Transparency = 1
+    anchor.Anchored     = true
+    anchor.CanCollide   = false
+    anchor.CastShadow   = false
+    anchor.Parent       = workspace
+    S._previewAnchor    = anchor
+    -- Keep legacy alias consistent (older code used _livePreviewAnchor)
+    S._livePreviewAnchor = anchor
+
+    if S.movePreview then
+        _attachMoveHandles()
+    end
+end
+
+-- Called by Move Preview toggle to attach/detach handles without rebuilding preview
+local function _setMovePreview(on)
+    S.movePreview = on
+    if on and S.livePreview and S._previewAnchor then
+        _attachMoveHandles()
+    elseif not on and S._previewHandles then
+        pcall(function() S._previewHandles:Destroy() end)
+        S._previewHandles = nil
+    end
+end
+
+-- Returns cumulative offset to be added to every fire position at build time
+local function _getPreviewOffset()
+    return S._previewOffset
+end
+
+-- ── Live Preview refresh callbacks (set by each builder's UI block) ────────
+-- These functions are called whenever the relevant parameter changes and
+-- S.livePreview is true. Each builder registers its own refresh function.
+local _cubePreviewRefresh = nil   -- set inside Build Cube do-block
+local _textPreviewRefresh = nil   -- set inside Build Text do-block
+local _loadPreviewRefresh = nil   -- set inside Load Build do-block
+-- ════════════════════════════════════════════════════════════════════════════
+
 local CT_FACES = {
     px={ax="X",dir= 1}, nx={ax="X",dir=-1},
     py={ax="Y",dir= 1}, ny={ax="Y",dir=-1},
@@ -2165,10 +2376,11 @@ local nanoPage      = _buildSubs["Nanobots"]
 -- ── BIG TAB 3: OP ────────────────────────────────────────────
 --   Sub-tabs: OP | ☢ Rad | TCO
 local _opBigPage = createTab("OP", 3)
-local _opSubs    = makeSubTabBar(_opBigPage, {"OP","\226\152\162 Rad","TCO"})
+local _opSubs    = makeSubTabBar(_opBigPage, {"OP","\226\152\162 Rad","TCO","AI Agent"})
 local opPage     = _opSubs["OP"]
 local radPage    = _opSubs["\226\152\162 Rad"]
 local tcoPage    = _opSubs["TCO"]
+local aiAgentPage = _opSubs["AI Agent"]
 
 -- ── BIG TAB 4: Anti ──────────────────────────────────────────
 --   Sub-tabs: Anti | Punish
@@ -4874,34 +5086,38 @@ local function dcDrawBeam()
     local att1 = Instance.new("Attachment"); att1.Parent = DC.beamPart1
     local att2 = Instance.new("Attachment"); att2.Parent = DC.beamPart2
 
-    local beam = Instance.new("Beam")
-    beam.Attachment0    = att1
-    beam.Attachment1    = att2
-    beam.Color          = ColorSequence.new(Color3.fromRGB(0,180,255))
-    beam.Width0         = 0.08
-    beam.Width1         = 0.08
-    beam.FaceCamera     = true
-    beam.Transparency   = NumberSequence.new(0)
-    beam.LightEmission  = 1
-    beam.Parent         = Workspace
-    DC.beam = beam
+    do
+        local beam = Instance.new("Beam")
+        beam.Attachment0    = att1
+        beam.Attachment1    = att2
+        beam.Color          = ColorSequence.new(Color3.fromRGB(0,180,255))
+        beam.Width0         = 0.08
+        beam.Width1         = 0.08
+        beam.FaceCamera     = true
+        beam.Transparency   = NumberSequence.new(0)
+        beam.LightEmission  = 1
+        beam.Parent         = Workspace
+        DC.beam = beam
+    end
 end
 
 -- Heartbeat: sync brick1 dots + beam if in phase 2+
-local _dcHBConn
-_dcHBConn = RunService.Heartbeat:Connect(function()
-    if DC.phase >= 2 and DC.brick1 and DC.brick1.Parent then
-        dcSyncDots1()
-        -- If corner1 is set, update the beam origin to follow brick1's corner
-        if DC.corner1 and DC.beamPart1 then
-            -- Recompute corner1 from brick1's stored local offset
-            if DC._c1localOff then
-                DC.corner1 = DC.brick1.CFrame:PointToWorldSpace(DC._c1localOff)
-                DC.beamPart1.CFrame = CFrame.new(DC.corner1)
+do
+    local _dcHBConn
+    _dcHBConn = RunService.Heartbeat:Connect(function()
+        if DC.phase >= 2 and DC.brick1 and DC.brick1.Parent then
+            dcSyncDots1()
+            -- If corner1 is set, update the beam origin to follow brick1's corner
+            if DC.corner1 and DC.beamPart1 then
+                -- Recompute corner1 from brick1's stored local offset
+                if DC._c1localOff then
+                    DC.corner1 = DC.brick1.CFrame:PointToWorldSpace(DC._c1localOff)
+                    DC.beamPart1.CFrame = CFrame.new(DC.corner1)
+                end
             end
         end
-    end
-end)
+    end)
+end
 
 -- Mouse click handler for DC phases
 E._mouse.Button1Down:Connect(function()
@@ -5002,53 +5218,55 @@ end)
 -- Drift thresholds: if the brick deviates more than these from desiredCF,
 -- we immediately re-claim ownership and re-snap it. This catches both
 -- accidental bumps from passing players AND gravity on unanchored bricks.
-local _DG_POS_TOL = 0.08   -- studs: position drift tolerance
-local _DG_ROT_TOL = 0.025  -- radians: rotation drift tolerance (≈1.4°)
-local _DG_OWNER_INTERVAL = 0.2  -- seconds: periodic ownership re-bump even without drift
+do
+    local _DG_POS_TOL = 0.08   -- studs: position drift tolerance
+    local _DG_ROT_TOL = 0.025  -- radians: rotation drift tolerance (≈1.4°)
+    local _DG_OWNER_INTERVAL = 0.2  -- seconds: periodic ownership re-bump even without drift
 
-RunService.Heartbeat:Connect(function()
-    if E.brick and E.brick.Parent then
-        -- ── Drift detection + immediate re-ownership ──────────────────
-        if E.desiredCF and _hasSetHidden then
-            local cur = E.brick.CFrame
-            local des = E.desiredCF
-            -- Position drift check
-            local posDrift = (cur.Position - des.Position).Magnitude
-            -- Rotation drift: compare right-vectors (robust across gimbal lock)
-            local rotDrift = (cur.RightVector - des.RightVector).Magnitude
-            local drifted  = posDrift > _DG_POS_TOL or rotDrift > _DG_ROT_TOL
-            local now      = tick()
-            local periodic = (now - E._ownerLastT) >= _DG_OWNER_INTERVAL
-            if drifted or periodic then
-                E._ownerLastT = now
-                -- Re-claim ownership
-                pcall(function() sethiddenproperty(lp, "SimulationRadius", 9e9) end)
-                if drifted then
-                    -- Drift detected: snap back to desired CFrame immediately
-                    pcall(function() E.brick.CFrame = des end)
-                    if E.bodyPos  then E.bodyPos.Position  = des.Position end
-                    if E.bodyGyro then E.bodyGyro.CFrame   = des - des.Position end
+    RunService.Heartbeat:Connect(function()
+        if E.brick and E.brick.Parent then
+            -- ── Drift detection + immediate re-ownership ──────────────────
+            if E.desiredCF and _hasSetHidden then
+                local cur = E.brick.CFrame
+                local des = E.desiredCF
+                -- Position drift check
+                local posDrift = (cur.Position - des.Position).Magnitude
+                -- Rotation drift: compare right-vectors (robust across gimbal lock)
+                local rotDrift = (cur.RightVector - des.RightVector).Magnitude
+                local drifted  = posDrift > _DG_POS_TOL or rotDrift > _DG_ROT_TOL
+                local now      = tick()
+                local periodic = (now - E._ownerLastT) >= _DG_OWNER_INTERVAL
+                if drifted or periodic then
+                    E._ownerLastT = now
+                    -- Re-claim ownership
+                    pcall(function() sethiddenproperty(lp, "SimulationRadius", 9e9) end)
+                    if drifted then
+                        -- Drift detected: snap back to desired CFrame immediately
+                        pcall(function() E.brick.CFrame = des end)
+                        if E.bodyPos  then E.bodyPos.Position  = des.Position end
+                        if E.bodyGyro then E.bodyGyro.CFrame   = des - des.Position end
+                    end
+                end
+            elseif _hasSetHidden then
+                -- desiredCF not set yet — still keep ownership bumped periodically
+                local now = tick()
+                if (now - E._ownerLastT) >= _DG_OWNER_INTERVAL then
+                    E._ownerLastT = now
+                    pcall(function() sethiddenproperty(lp, "SimulationRadius", 9e9) end)
                 end
             end
-        elseif _hasSetHidden then
-            -- desiredCF not set yet — still keep ownership bumped periodically
-            local now = tick()
-            if (now - E._ownerLastT) >= _DG_OWNER_INTERVAL then
-                E._ownerLastT = now
-                pcall(function() sethiddenproperty(lp, "SimulationRadius", 9e9) end)
+            -- ── Local-only CanCollide suppression ─────────────────────────
+            -- The server never sees this write, so anchor/collide remotes are unaffected.
+            if E.collideOff then
+                pcall(function() E.brick.CanCollide = false end)
             end
+            syncHandles()
+        elseif E.brick then
+            fullCleanup()
+            notify("De-Grid", "Brick was removed externally!")
         end
-        -- ── Local-only CanCollide suppression ─────────────────────────
-        -- The server never sees this write, so anchor/collide remotes are unaffected.
-        if E.collideOff then
-            pcall(function() E.brick.CanCollide = false end)
-        end
-        syncHandles()
-    elseif E.brick then
-        fullCleanup()
-        notify("De-Grid", "Brick was removed externally!")
-    end
-end)
+    end)
+end
 
 -- ═══════════════════════════════════════════════════════════════
 -- ── De-Grid Floating Menu ────────────────────────────────────
@@ -5067,8 +5285,10 @@ dgMenu.ZIndex           = 60
 dgMenu.Visible          = false
 dgMenu.Parent           = ScreenGui
 onTheme(function(th) dgMenu.BackgroundColor3=th.BG end)
-local _dgMS=Instance.new("UIStroke",dgMenu)
-_dgMS.Color=Color3.fromRGB(255,120,0); _dgMS.Thickness=1.5
+do
+    local _dgMS=Instance.new("UIStroke",dgMenu)
+    _dgMS.Color=Color3.fromRGB(255,120,0); _dgMS.Thickness=1.5
+end
 
 -- Inner scrolling frame — all widgets go here, not directly in dgMenu
 local dgScroll=Instance.new("ScrollingFrame")
@@ -5079,11 +5299,13 @@ dgScroll.CanvasSize=UDim2.new(0,0,0,0)   -- auto-updated below
 dgScroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
 dgScroll.ElasticBehavior=Enum.ElasticBehavior.Always  -- smooth mobile overscroll
 dgScroll.ZIndex=61; dgScroll.Parent=dgMenu
-local _dgML=Instance.new("UIListLayout",dgScroll)
-_dgML.SortOrder=Enum.SortOrder.LayoutOrder; _dgML.Padding=UDim.new(0,3)
-local _dgMP=Instance.new("UIPadding",dgScroll)
-_dgMP.PaddingTop=UDim.new(0,6); _dgMP.PaddingBottom=UDim.new(0,6)
-_dgMP.PaddingLeft=UDim.new(0,7); _dgMP.PaddingRight=UDim.new(0,7)
+do
+    local _dgML=Instance.new("UIListLayout",dgScroll)
+    _dgML.SortOrder=Enum.SortOrder.LayoutOrder; _dgML.Padding=UDim.new(0,3)
+    local _dgMP=Instance.new("UIPadding",dgScroll)
+    _dgMP.PaddingTop=UDim.new(0,6); _dgMP.PaddingBottom=UDim.new(0,6)
+    _dgMP.PaddingLeft=UDim.new(0,7); _dgMP.PaddingRight=UDim.new(0,7)
+end
 
 -- Widget helpers — all widgets parent into dgScroll (the inner scrolling frame)
 local function dgMkLbl(txt,order)
@@ -5151,12 +5373,14 @@ local function dgMkInput(label,def,order,fn)
 end
 
 -- ── Title ──────────────────────────────────────────────────────
-local _dgTitle=Instance.new("TextLabel")
-_dgTitle.Size=UDim2.new(1,0,0,18); _dgTitle.BackgroundTransparency=1
-_dgTitle.Text="\226\172\161 De-Grid Tool"; _dgTitle.TextColor3=Color3.fromRGB(255,120,0)
-_dgTitle.FontFace=FONT_MAIN; _dgTitle.TextSize=13
-_dgTitle.TextXAlignment=Enum.TextXAlignment.Left
-_dgTitle.ZIndex=61; _dgTitle.LayoutOrder=0; _dgTitle.Parent=dgScroll
+do
+    local _dgTitle=Instance.new("TextLabel")
+    _dgTitle.Size=UDim2.new(1,0,0,18); _dgTitle.BackgroundTransparency=1
+    _dgTitle.Text="\226\172\161 De-Grid Tool"; _dgTitle.TextColor3=Color3.fromRGB(255,120,0)
+    _dgTitle.FontFace=FONT_MAIN; _dgTitle.TextSize=13
+    _dgTitle.TextXAlignment=Enum.TextXAlignment.Left
+    _dgTitle.ZIndex=61; _dgTitle.LayoutOrder=0; _dgTitle.Parent=dgScroll
+end
 
 -- ── 1. Select + Apply Offset ───────────────────────────────────
 dgMkLbl("\226\148\128\226\148\128 1. Select & Apply Offset \226\148\128\226\148\128",1)
@@ -5164,35 +5388,39 @@ dgMkLbl("\226\148\128\226\148\128 1. Select & Apply Offset \226\148\128\226\148\
 E.statusLbl=dgMkLbl("No brick selected",2)
 E.statusLbl.TextColor3=Color3.fromRGB(160,160,160)
 
-local _,selSet=dgMkToggle("Select Brick",3,function(on)
-    E.selectArmed=on
-    if on then
-        notify("De-Grid","Click an UNANCHORED brick to select it.")
-        if E.statusLbl then
-            E.statusLbl.Text="Click an unanchored brick..."
-            E.statusLbl.TextColor3=Color3.fromRGB(255,200,0)
+do
+    local _,selSet=dgMkToggle("Select Brick",3,function(on)
+        E.selectArmed=on
+        if on then
+            notify("De-Grid","Click an UNANCHORED brick to select it.")
+            if E.statusLbl then
+                E.statusLbl.Text="Click an unanchored brick..."
+                E.statusLbl.TextColor3=Color3.fromRGB(255,200,0)
+            end
         end
-    end
-end)
-E._selBrickSet=selSet
+    end)
+    E._selBrickSet=selSet
+end
 
 -- ── No Collision toggle ────────────────────────────────────────
 -- Sets E.collideOff so the Heartbeat loop enforces CanCollide=false
 -- locally every frame. Purely client-side — no remote is ever fired,
 -- so it works regardless of anchor state. applyAnchor() restores
 -- CanCollide=true locally before committing the brick.
-local _,collSet=dgMkToggle("No Collision",4,function(on)
-    E.collideOff=on
-    if E.statusLbl and E.brick then
-        E.statusLbl.Text = on and "No collision \226\151\147 move freely"
-                               or "Collision restored"
-        E.statusLbl.TextColor3 = on and Color3.fromRGB(255,80,80)
-                                     or Color3.fromRGB(160,160,160)
-    end
-    notify("De-Grid", on and "Collision OFF \226\128\148 brick passes through geometry."
-                          or "Collision restored.")
-end)
-E._setCollideTog=collSet
+do
+    local _,collSet=dgMkToggle("No Collision",4,function(on)
+        E.collideOff=on
+        if E.statusLbl and E.brick then
+            E.statusLbl.Text = on and "No collision \226\151\147 move freely"
+                                   or "Collision restored"
+            E.statusLbl.TextColor3 = on and Color3.fromRGB(255,80,80)
+                                         or Color3.fromRGB(160,160,160)
+        end
+        notify("De-Grid", on and "Collision OFF \226\128\148 brick passes through geometry."
+                              or "Collision restored.")
+    end)
+    E._setCollideTog=collSet
+end
 
 -- "Apply Offset" — delete→build cycle, auto-selects new off-grid brick.
 dgMkBtn("\226\172\161 Apply Offset",5,function(btn)
@@ -5211,14 +5439,16 @@ end)
 -- ── 2. Move ────────────────────────────────────────────────────
 dgMkLbl("\226\148\128\226\148\128 2. Move  (drag arrow handles) \226\148\128\226\148\128",6)
 
-local _,movSet=dgMkToggle("Move Brick",7,function(on)
-    setMoveMode(on)
-    if on and E.brick and E.statusLbl then
-        E.statusLbl.Text="Move mode \226\128\148 drag the arrows"
-        E.statusLbl.TextColor3=Color3.fromRGB(255,120,0)
-    end
-end)
-E._setMoveTog=movSet
+do
+    local _,movSet=dgMkToggle("Move Brick",7,function(on)
+        setMoveMode(on)
+        if on and E.brick and E.statusLbl then
+            E.statusLbl.Text="Move mode \226\128\148 drag the arrows"
+            E.statusLbl.TextColor3=Color3.fromRGB(255,120,0)
+        end
+    end)
+    E._setMoveTog=movSet
+end
 
 dgMkInput("Grid Snap (studs)","1",8,function(v)
     local n=tonumber(v); if n and n>=0.01 then E.gridSnap=n end
@@ -5244,154 +5474,160 @@ dgMkLbl("\226\148\128\226\148\128 Corner Align \226\148\128\226\148\128",9)
 
 -- Mode selector (stored in DC table so the Connect button can read it)
 DC.alignMode = "Direction"   -- default: safe directional rotation
-local _dcModeRow=Instance.new("Frame")
-_dcModeRow.Size=UDim2.new(1,0,0,20); _dcModeRow.BackgroundTransparency=1
-_dcModeRow.ZIndex=61; _dcModeRow.LayoutOrder=10; _dcModeRow.Parent=dgScroll
-local _dcModeLbl=Instance.new("TextLabel")
-_dcModeLbl.Size=UDim2.new(0.38,0,1,0); _dcModeLbl.BackgroundTransparency=1
-_dcModeLbl.Text="Mode:"; _dcModeLbl.TextColor3=Color3.fromRGB(150,150,150)
-_dcModeLbl.FontFace=FONT_MAIN; _dcModeLbl.TextSize=10
-_dcModeLbl.TextXAlignment=Enum.TextXAlignment.Left
-_dcModeLbl.ZIndex=62; _dcModeLbl.Parent=_dcModeRow
--- Cycle button: Direction ↔ Snap
-local _dcModeBtn=Instance.new("TextButton")
-_dcModeBtn.Size=UDim2.new(0.60,0,1,0); _dcModeBtn.Position=UDim2.new(0.40,0,0,0)
-_dcModeBtn.BackgroundColor3=T.BTN; _dcModeBtn.BorderSizePixel=1
-_dcModeBtn.BorderColor3=T.BORDER; _dcModeBtn.Text="Direction \226\134\149"
-_dcModeBtn.TextColor3=Color3.fromRGB(100,200,255)
-_dcModeBtn.FontFace=FONT_MAIN; _dcModeBtn.TextSize=10
-_dcModeBtn.ZIndex=62; _dcModeBtn.Parent=_dcModeRow
-onTheme(function(th)
-    _dcModeBtn.BackgroundColor3=th.BTN; _dcModeBtn.BorderColor3=th.BORDER
-end)
-_dcModeBtn.MouseButton1Click:Connect(function()
-    if DC.alignMode == "Direction" then
-        DC.alignMode = "Snap"
-        _dcModeBtn.Text = "Snap \226\134\149"
-        _dcModeBtn.TextColor3 = Color3.fromRGB(255,180,60)
-    else
-        DC.alignMode = "Direction"
-        _dcModeBtn.Text = "Direction \226\134\149"
-        _dcModeBtn.TextColor3 = Color3.fromRGB(100,200,255)
-    end
-    dcFullReset()
-    notify("De-Grid","Corner Align mode: "..DC.alignMode)
-end)
+do
+    local _dcModeRow=Instance.new("Frame")
+    _dcModeRow.Size=UDim2.new(1,0,0,20); _dcModeRow.BackgroundTransparency=1
+    _dcModeRow.ZIndex=61; _dcModeRow.LayoutOrder=10; _dcModeRow.Parent=dgScroll
+    local _dcModeLbl=Instance.new("TextLabel")
+    _dcModeLbl.Size=UDim2.new(0.38,0,1,0); _dcModeLbl.BackgroundTransparency=1
+    _dcModeLbl.Text="Mode:"; _dcModeLbl.TextColor3=Color3.fromRGB(150,150,150)
+    _dcModeLbl.FontFace=FONT_MAIN; _dcModeLbl.TextSize=10
+    _dcModeLbl.TextXAlignment=Enum.TextXAlignment.Left
+    _dcModeLbl.ZIndex=62; _dcModeLbl.Parent=_dcModeRow
+    -- Cycle button: Direction ↔ Snap
+    local _dcModeBtn=Instance.new("TextButton")
+    _dcModeBtn.Size=UDim2.new(0.60,0,1,0); _dcModeBtn.Position=UDim2.new(0.40,0,0,0)
+    _dcModeBtn.BackgroundColor3=T.BTN; _dcModeBtn.BorderSizePixel=1
+    _dcModeBtn.BorderColor3=T.BORDER; _dcModeBtn.Text="Direction \226\134\149"
+    _dcModeBtn.TextColor3=Color3.fromRGB(100,200,255)
+    _dcModeBtn.FontFace=FONT_MAIN; _dcModeBtn.TextSize=10
+    _dcModeBtn.ZIndex=62; _dcModeBtn.Parent=_dcModeRow
+    onTheme(function(th)
+        _dcModeBtn.BackgroundColor3=th.BTN; _dcModeBtn.BorderColor3=th.BORDER
+    end)
+    _dcModeBtn.MouseButton1Click:Connect(function()
+        if DC.alignMode == "Direction" then
+            DC.alignMode = "Snap"
+            _dcModeBtn.Text = "Snap \226\134\149"
+            _dcModeBtn.TextColor3 = Color3.fromRGB(255,180,60)
+        else
+            DC.alignMode = "Direction"
+            _dcModeBtn.Text = "Direction \226\134\149"
+            _dcModeBtn.TextColor3 = Color3.fromRGB(100,200,255)
+        end
+        dcFullReset()
+        notify("De-Grid","Corner Align mode: "..DC.alignMode)
+    end)
+end
 
 -- Phase label
-local _dcPhaseLbl=dgMkLbl("\226\151\136 Corner Align",11)
-_dcPhaseLbl.TextColor3=Color3.fromRGB(100,180,255)
-DC.phaseLbl=_dcPhaseLbl
+do
+    local _dcPhaseLbl=dgMkLbl("\226\151\136 Corner Align",11)
+    _dcPhaseLbl.TextColor3=Color3.fromRGB(100,180,255)
+    DC.phaseLbl=_dcPhaseLbl
+end
 
 -- Main cycling button
-local _dcMainBtn=dgMkBtn("\226\151\136 Start: Select Brick 1",12,function(btn)
-    if DC.phase==0 then
-        DC.phase=1
-        dcSetPhaseText("\226\151\136 Click Brick 1 (off-grid brick)",Color3.fromRGB(255,120,0))
-        notify("De-Grid","Click the off-grid (unanchored) brick.")
+do
+    local _dcMainBtn=dgMkBtn("\226\151\136 Start: Select Brick 1",12,function(btn)
+        if DC.phase==0 then
+            DC.phase=1
+            dcSetPhaseText("\226\151\136 Click Brick 1 (off-grid brick)",Color3.fromRGB(255,120,0))
+            notify("De-Grid","Click the off-grid (unanchored) brick.")
 
-    elseif DC.phase==5 then
-        -- ── CONNECT ──────────────────────────────────────────────
-        if not DC.corner1 or not DC.corner2 then dcFullReset(); return end
-        if not DC.brick1 or not DC.brick1.Parent then
-            notify("De-Grid","Brick1 is gone!"); dcFullReset(); return
-        end
-
-        if DC.alignMode == "Snap" then
-            -- ── SNAP mode: translate so C1 == C2 ─────────────────
-            local liveC1 = DC.brick1.CFrame:PointToWorldSpace(DC._c1localOff)
-            local delta  = DC.corner2 - liveC1
-            if E.brick == DC.brick1 and E.bodyPos then
-                E.bodyPos.Position = E.bodyPos.Position + delta
-            else
-                if not DC.brick1.Anchored then
-                    E.brick = DC.brick1
-                    installPhysics(DC.brick1)
-                    task.wait(0.05)
-                    E.bodyPos.Position = DC.brick1.Position + delta
-                end
+        elseif DC.phase==5 then
+            -- ── CONNECT ──────────────────────────────────────────────
+            if not DC.corner1 or not DC.corner2 then dcFullReset(); return end
+            if not DC.brick1 or not DC.brick1.Parent then
+                notify("De-Grid","Brick1 is gone!"); dcFullReset(); return
             end
-            notify("De-Grid","\226\156\147 Snapped! Apply Offset, then Apply Anchor.")
 
-        else
-            -- ── DIRECTION mode: rotate Brick1 so its C1-axis
-            --    aligns with the C2-direction of Brick2 ──────────
-            -- targetDir: the world-space direction we want Brick1's
-            -- C1 local axis to point toward.
-            local b2centre  = DC.brick2.CFrame.Position
-            local targetDir = (DC.corner2 - b2centre)
-            if targetDir.Magnitude < 0.01 then
-                notify("De-Grid","Corners too close to centre — pick a different corner."); return
-            end
-            targetDir = targetDir.Unit
-
-            -- sourceDir: the local-space offset of C1 from Brick1's centre
-            -- (already stored as DC._c1localOff, which is local object-space)
-            local srcLocal = DC._c1localOff
-            if srcLocal.Magnitude < 0.01 then
-                notify("De-Grid","Corner1 is at the brick centre — pick a corner, not centre."); return
-            end
-            local srcDir = srcLocal.Unit   -- object-space unit axis to align
-
-            -- Build a rotation CFrame that maps srcDir → targetDir.
-            -- We use the axis-angle formula: cross product gives the rotation
-            -- axis, dot gives the cosine of the angle.
-            local crossV = Vector3.new(srcDir.Y*targetDir.Z - srcDir.Z*targetDir.Y,
-                                       srcDir.Z*targetDir.X - srcDir.X*targetDir.Z,
-                                       srcDir.X*targetDir.Y - srcDir.Y*targetDir.X)
-            local dotV   = srcDir:Dot(targetDir)
-
-            local newCF
-            if crossV.Magnitude < 0.001 then
-                -- Vectors are parallel (or anti-parallel)
-                if dotV > 0 then
-                    -- Already aligned — nothing to rotate
-                    newCF = DC.brick1.CFrame
+            if DC.alignMode == "Snap" then
+                -- ── SNAP mode: translate so C1 == C2 ─────────────────
+                local liveC1 = DC.brick1.CFrame:PointToWorldSpace(DC._c1localOff)
+                local delta  = DC.corner2 - liveC1
+                if E.brick == DC.brick1 and E.bodyPos then
+                    E.bodyPos.Position = E.bodyPos.Position + delta
                 else
-                    -- 180° flip: pick any perpendicular axis
-                    local perp = srcDir:Cross(Vector3.new(0,1,0))
-                    if perp.Magnitude < 0.01 then perp = srcDir:Cross(Vector3.new(1,0,0)) end
-                    perp = perp.Unit
-                    -- CFrame.fromAxisAngle rotates the brick's object frame
-                    local rotPart = CFrame.fromAxisAngle(perp, math.pi)
-                    newCF = CFrame.new(DC.brick1.CFrame.Position) * rotPart
+                    if not DC.brick1.Anchored then
+                        E.brick = DC.brick1
+                        installPhysics(DC.brick1)
+                        task.wait(0.05)
+                        E.bodyPos.Position = DC.brick1.Position + delta
+                    end
                 end
+                notify("De-Grid","\226\156\147 Snapped! Apply Offset, then Apply Anchor.")
+
             else
-                local axis  = crossV.Unit
-                local angle = math.atan2(crossV.Magnitude, dotV)
-                -- Post-multiply in object space so the brick rotates around
-                -- its own C1 axis by exactly the angle needed.
-                newCF = CFrame.new(DC.brick1.CFrame.Position) *
-                        (DC.brick1.CFrame - DC.brick1.CFrame.Position) *
-                        CFrame.fromAxisAngle(axis, angle)
-            end
-
-            -- Apply the new CFrame via BodyGyro
-            if E.brick ~= DC.brick1 then
-                if not DC.brick1.Anchored then
-                    E.brick = DC.brick1
-                    installPhysics(DC.brick1)
-                    task.wait(0.05)
+                -- ── DIRECTION mode: rotate Brick1 so its C1-axis
+                --    aligns with the C2-direction of Brick2 ──────────
+                -- targetDir: the world-space direction we want Brick1's
+                -- C1 local axis to point toward.
+                local b2centre  = DC.brick2.CFrame.Position
+                local targetDir = (DC.corner2 - b2centre)
+                if targetDir.Magnitude < 0.01 then
+                    notify("De-Grid","Corners too close to centre — pick a different corner."); return
                 end
-            end
-            if E.bodyGyro then
-                E.bodyGyro.CFrame = newCF - newCF.Position
-                -- Keep desiredCF in sync with the new rotation
-                E.desiredCF = newCF
-            end
-            -- Sync the XYZ display boxes
-            task.wait(0.05); readCFrame()
-            notify("De-Grid","\226\156\147 Brick1 rotated toward corner 2. Adjust, then Apply Offset.")
-        end
+                targetDir = targetDir.Unit
 
-        dcClearDots(DC.dots1); dcClearDots(DC.dots2)
-        dcClearSelBox2()
-        DC.phase=0
-        dcSetPhaseText("\226\151\136 Corner Align",Color3.fromRGB(100,180,255))
-        btn.Text="\226\151\136 Start: Select Brick 1"
-    end
-end)
-DC.btn=_dcMainBtn
+                -- sourceDir: the local-space offset of C1 from Brick1's centre
+                -- (already stored as DC._c1localOff, which is local object-space)
+                local srcLocal = DC._c1localOff
+                if srcLocal.Magnitude < 0.01 then
+                    notify("De-Grid","Corner1 is at the brick centre — pick a corner, not centre."); return
+                end
+                local srcDir = srcLocal.Unit   -- object-space unit axis to align
+
+                -- Build a rotation CFrame that maps srcDir → targetDir.
+                -- We use the axis-angle formula: cross product gives the rotation
+                -- axis, dot gives the cosine of the angle.
+                local crossV = Vector3.new(srcDir.Y*targetDir.Z - srcDir.Z*targetDir.Y,
+                                           srcDir.Z*targetDir.X - srcDir.X*targetDir.Z,
+                                           srcDir.X*targetDir.Y - srcDir.Y*targetDir.X)
+                local dotV   = srcDir:Dot(targetDir)
+
+                local newCF
+                if crossV.Magnitude < 0.001 then
+                    -- Vectors are parallel (or anti-parallel)
+                    if dotV > 0 then
+                        -- Already aligned — nothing to rotate
+                        newCF = DC.brick1.CFrame
+                    else
+                        -- 180° flip: pick any perpendicular axis
+                        local perp = srcDir:Cross(Vector3.new(0,1,0))
+                        if perp.Magnitude < 0.01 then perp = srcDir:Cross(Vector3.new(1,0,0)) end
+                        perp = perp.Unit
+                        -- CFrame.fromAxisAngle rotates the brick's object frame
+                        local rotPart = CFrame.fromAxisAngle(perp, math.pi)
+                        newCF = CFrame.new(DC.brick1.CFrame.Position) * rotPart
+                    end
+                else
+                    local axis  = crossV.Unit
+                    local angle = math.atan2(crossV.Magnitude, dotV)
+                    -- Post-multiply in object space so the brick rotates around
+                    -- its own C1 axis by exactly the angle needed.
+                    newCF = CFrame.new(DC.brick1.CFrame.Position) *
+                            (DC.brick1.CFrame - DC.brick1.CFrame.Position) *
+                            CFrame.fromAxisAngle(axis, angle)
+                end
+
+                -- Apply the new CFrame via BodyGyro
+                if E.brick ~= DC.brick1 then
+                    if not DC.brick1.Anchored then
+                        E.brick = DC.brick1
+                        installPhysics(DC.brick1)
+                        task.wait(0.05)
+                    end
+                end
+                if E.bodyGyro then
+                    E.bodyGyro.CFrame = newCF - newCF.Position
+                    -- Keep desiredCF in sync with the new rotation
+                    E.desiredCF = newCF
+                end
+                -- Sync the XYZ display boxes
+                task.wait(0.05); readCFrame()
+                notify("De-Grid","\226\156\147 Brick1 rotated toward corner 2. Adjust, then Apply Offset.")
+            end
+
+            dcClearDots(DC.dots1); dcClearDots(DC.dots2)
+            dcClearSelBox2()
+            DC.phase=0
+            dcSetPhaseText("\226\151\136 Corner Align",Color3.fromRGB(100,180,255))
+            btn.Text="\226\151\136 Start: Select Brick 1"
+        end
+    end)
+    DC.btn=_dcMainBtn
+end
 
 dgMkBtn("\226\134\186 Reset Corner Align",13,function()
     dcFullReset()
@@ -5401,45 +5637,53 @@ end)
 -- ── 3. Rotate ──────────────────────────────────────────────────
 dgMkLbl("\226\148\128\226\148\128 3. Rotate  (rings or type) \226\148\128\226\148\128",14)
 
-local _,rotSet=dgMkToggle("Rotate Brick",15,function(on)
-    setRotateMode(on)
-    if on and E.brick and E.statusLbl then
-        E.statusLbl.Text="Rotate mode \226\128\148 drag rings or type"
-        E.statusLbl.TextColor3=Color3.fromRGB(0,200,255)
-    end
-end)
-E._setRotateTog=rotSet
+do
+    local _,rotSet=dgMkToggle("Rotate Brick",15,function(on)
+        setRotateMode(on)
+        if on and E.brick and E.statusLbl then
+            E.statusLbl.Text="Rotate mode \226\128\148 drag rings or type"
+            E.statusLbl.TextColor3=Color3.fromRGB(0,200,255)
+        end
+    end)
+    E._setRotateTog=rotSet
+end
 
 dgMkInput("Round Angle\194\176","15",16,function(v)
     local n=tonumber(v); if n and n>=1 then E.roundAngle=n end
 end)
 
-local _,xBx=dgMkInput("X\194\176","0",17,function(v)
-    local n=tonumber(v)
-    if n then
-        if E.rotateMode and E.brick then setRotation(n,E.rotY,E.rotZ)
-        else E.rotX=n end
-    end
-end)
-E.xBox=xBx
+do
+    local _,xBx=dgMkInput("X\194\176","0",17,function(v)
+        local n=tonumber(v)
+        if n then
+            if E.rotateMode and E.brick then setRotation(n,E.rotY,E.rotZ)
+            else E.rotX=n end
+        end
+    end)
+    E.xBox=xBx
+end
 
-local _,yBx=dgMkInput("Y\194\176","0",18,function(v)
-    local n=tonumber(v)
-    if n then
-        if E.rotateMode and E.brick then setRotation(E.rotX,n,E.rotZ)
-        else E.rotY=n end
-    end
-end)
-E.yBox=yBx
+do
+    local _,yBx=dgMkInput("Y\194\176","0",18,function(v)
+        local n=tonumber(v)
+        if n then
+            if E.rotateMode and E.brick then setRotation(E.rotX,n,E.rotZ)
+            else E.rotY=n end
+        end
+    end)
+    E.yBox=yBx
+end
 
-local _,zBx=dgMkInput("Z\194\176","0",19,function(v)
-    local n=tonumber(v)
-    if n then
-        if E.rotateMode and E.brick then setRotation(E.rotX,E.rotY,n)
-        else E.rotZ=n end
-    end
-end)
-E.zBox=zBx
+do
+    local _,zBx=dgMkInput("Z\194\176","0",19,function(v)
+        local n=tonumber(v)
+        if n then
+            if E.rotateMode and E.brick then setRotation(E.rotX,E.rotY,n)
+            else E.rotZ=n end
+        end
+    end)
+    E.zBox=zBx
+end
 
 -- ── 4. Anchor ──────────────────────────────────────────────────
 dgMkLbl("\226\148\128\226\148\128 4. Anchor \226\148\128\226\148\128",20)
@@ -5975,15 +6219,11 @@ end
 -- ═══ EMBEDDED TEXT-TO-BUILD LIBRARY ════════════════════════════
 -- ═══════════════════════════════════════════════════════════════
 
--- ═══ BLITZ BUILD ═══════════════════════════════════════════════════════════════
--- BLITZ BUILD — pure fire helper. No passes, no verify, no waits.
--- PRIMARY pattern: snake (Y→X→Z sort). Server-side placement checks
--- benefit from spatial locality — each new brick shares a face with
--- the previous, keeping the server geometry context warm and reducing
--- dropped remotes at 15-20 bps.
--- Player MUST already be anchored at the correct position.
--- ev MUST be valid — caller is responsible for validation.
--- ═══════════════════════════════════════════════════════════════
+-- ═══ BLITZ BUILD — pure aura-fire kernel (v4.7.4) ═══════════════════════════
+-- No sort, no per-N yield. Fires every position in the cluster at full Luau
+-- throughput and returns. Caller is responsible for post-fire verification.
+-- This is the hot path called by blitzBuildChaos on Wave 1 and every re-pass.
+-- ═══════════════════════════════════════════════════════════════════════════════
 local function blitzBuild(ev, positions, bsize, probe)
     local arg = bsize or "normal"
 
@@ -5996,20 +6236,12 @@ local function blitzBuild(ev, positions, bsize, probe)
     end
     if #unique == 0 then return end
 
-    -- Snake sort: Y asc → X asc → Z asc (layer by layer, row by row)
-    -- Consecutive fires are always adjacent bricks, maximising spatial
-    -- locality and keeping the server geometry state warm per burst.
-    table.sort(unique, function(a, b)
-        if a.Y ~= b.Y then return a.Y < b.Y end
-        if a.X ~= b.X then return a.X < b.X end
-        return a.Z < b.Z
-    end)
-
-    -- Fire in bursts of 12 (~12-15 bricks/sec with 0.07s yield)
-    for i, pos in ipairs(unique) do
+    -- Aura fire: blast every position in the cluster with zero delay.
+    -- The server queue handles ordering; spatial locality is less important
+    -- than raw throughput when the player is anchored at the cluster centre.
+    for _, pos in ipairs(unique) do
         if S.buildStopped then return end
         ev:FireServer(Workspace.Terrain, Enum.NormalId.Top, pos, arg)
-        if i % 12 == 0 then task.wait(0.07) end
     end
 end
 
@@ -6082,15 +6314,14 @@ local function blitzBuildChaos(ev, positions, bsize, probe)
             blitzBuild(ev, targets, arg, probeBox)
             isRepass = true
         else
-            -- Wave 2+: chaos shuffle (holes are sparse, locality gone)
+            -- Wave 2+: chaos shuffle then full-speed aura fire (holes are sparse)
             for i = #targets, 2, -1 do
                 local j = math.random(1, i)
                 targets[i], targets[j] = targets[j], targets[i]
             end
-            for i, pos in ipairs(targets) do
+            for _, pos in ipairs(targets) do
                 if S.buildStopped then return end
                 ev:FireServer(Workspace.Terrain, Enum.NormalId.Top, pos, arg)
-                if i % 12 == 0 then task.wait(0.07) end
             end
         end
 
@@ -7498,6 +7729,21 @@ do
     -- ║  Phase 3: Build+Shape-resize for any other size          ║
     -- ║  Phase 4: Paint / spray pass (all blocks)                ║
     -- ╚══════════════════════════════════════════════════════════╝
+
+    -- ── Live Preview / Move Preview toggles for Load Build ───────────────
+    makeToggle(g, "Live Preview", function(on)
+        S.livePreview = on
+        S._previewGenTag = "load"
+        if on then
+            if _loadPreviewRefresh then _loadPreviewRefresh() end
+        else
+            _clearLivePreview()
+        end
+    end, false)
+    makeToggle(g, "Move Preview", function(on)
+        _setMovePreview(on)
+    end, false)
+
     makeButton(g,"Load Build",function(btn)
         if S.saveName == "" or S.saveName == "(no saves)" then btn.Text="Select save!"; return end
         local path = "SigmaPanel_Builds/"..S.saveName..".json"
@@ -7510,6 +7756,10 @@ do
         S.buildStopped = false
         S.skipBlock    = false
         btn.Text = "Parsing..."
+
+        -- Capture and clear the move-preview offset before building
+        local _loadOffset = _getPreviewOffset()
+        _clearLivePreview()
 
         task.spawn(function()
             -- ── Save player position so we can restore after all TPs ─
@@ -7638,6 +7888,17 @@ do
                 end
                 table.insert(allMeta, meta)
             end
+            end
+
+            -- ── Apply Move Preview offset to all meta build positions ─────────
+            -- If the player dragged the load preview before firing, _loadOffset
+            -- is non-zero and we shift every brick's buildPos/rawCenter/pos by it.
+            if _loadOffset.Magnitude > 0.01 then
+                for _, mt in ipairs(allMeta) do
+                    mt.buildPos  = mt.buildPos  + _loadOffset
+                    mt.rawCenter = mt.rawCenter + _loadOffset
+                    mt.pos       = mt.pos       + _loadOffset
+                end
             end
 
             local total = #normalMeta + #detailedMeta + #shapedMeta
@@ -8396,23 +8657,30 @@ do
                                 local anchorPart = builtPart[anchorMetaIdx]
                                 local norm       = FACE_NORM[anchorFace] or Vector3.new(0,1,0)
                                 local ax         = FACE_AX[anchorFace]   or "Y"
-                                local faceCenter = anchorPart.Position + norm * (anchorPart.Size[ax] / 2)
+                                -- Use the anchor's targetSize (not its live .Size) for the
+                                -- face-center calculation. anchorPart.Size is the server-
+                                -- replicated value, which may still lag by one frame if the
+                                -- anchor was just shaped in the previous iteration. Using the
+                                -- intended target size (always available, never stale) gives
+                                -- the correct face-center even when replication is in flight.
+                                local anchorMeta  = shapedMeta[anchorMetaIdx]
+                                    or (anchorMetaIdx == 0 and {targetSize = anchorPart.Size} or nil)
+                                local anchorHalf  = anchorMeta and anchorMeta.targetSize[ax] / 2
+                                    or anchorPart.Size[ax] / 2  -- fallback: live size (sentinel seeder)
+                                local faceCenter = anchorPart.Position + norm * anchorHalf
 
+                                -- Face-attach is infinite range — no teleport needed.
+                                -- The server's brick-to-brick build path bypasses the
+                                -- proximity check that terrain builds require.
                                 LOG("Load", string.format(
                                     "  [%d/%d] Strategy A: face-attach anchor=%d face=%s faceCenter=(%.1f,%.1f,%.1f)",
                                     orderIdx, #buildOrder, anchorMetaIdx, tostring(anchorFace),
                                     faceCenter.X, faceCenter.Y, faceCenter.Z))
 
-                                hrp.CFrame   = CFrame.new(faceCenter + norm * 6)
-                                task.wait(BUILD_SETTLE)
-                                waitForServerPosSync(hrp, faceCenter + norm * 6)
-                                hrp.Anchored = true
-
                                 buildEv:FireServer(anchorPart, anchorFace, faceCenter, "normal")
 
                                 local dlA = tick() + 1.5
                                 while not lastBuilt and tick() < dlA do task.wait(0.05) end
-                                hrp.Anchored = false
 
                                 if lastBuilt then
                                     LOG("Load", string.format("  [%d/%d] Strategy A: OK (%.2fs wait)", orderIdx, #buildOrder, 1.5 - math.max(0, dlA - tick())))
@@ -8579,10 +8847,154 @@ do
                             builtPart[metaIdx] = part
                             meta.builtPart     = part
 
-                            -- Shape ops: increase-first on initial pass
-                            applyShapeOps(part, meta, false)
+                            -- ── Size-replication settle ───────────────────────────
+                            -- The Build remote creates the brick server-side and the
+                            -- client's ChildAdded fires almost immediately — before the
+                            -- server's replicated Size has arrived. Reading part.Size
+                            -- here can still return the stale 4×4×4 default, causing
+                            -- applyShapeOps to compute a bogus full-reshape delta even
+                            -- when the brick was already spawned at the correct size
+                            -- (inherited from the anchor via face-attach). Wait one
+                            -- extra tick for the size property to replicate, then check
+                            -- whether shaping is actually needed before firing.
+                            task.wait(SHAPE_WAIT)
+
+                            -- ── Skip shaping if inherited size already matches ────
+                            -- When Strategy A built off a correctly-sized anchor the
+                            -- server copies that anchor's size onto the new brick.
+                            -- If the inherited size already matches the target within
+                            -- 0.49 studs on every axis, applyShapeOps would fire zero
+                            -- net operations anyway — but reading a stale size before
+                            -- replication settles caused it to re-shape the brick from
+                            -- scratch (e.g. 4,1,4 → 4,4,2 repeated for every wall
+                            -- brick instead of only the first one). This guard makes
+                            -- the skip explicit and race-condition-proof.
+                            local EPS_SPAWN = 0.49
+                            local pSz = part.Size
+                            local alreadySized = math.abs(pSz.X - tSz.X) <= EPS_SPAWN
+                                             and math.abs(pSz.Y - tSz.Y) <= EPS_SPAWN
+                                             and math.abs(pSz.Z - tSz.Z) <= EPS_SPAWN
+                            if not alreadySized then
+                                -- Shape ops: increase-first on initial pass
+                                applyShapeOps(part, meta, false)
+                            else
+                                LOG("Load", string.format(
+                                    "  [%d/%d] Size already correct (%.0fx%.0fx%.0f) — shaping skipped.",
+                                    orderIdx, #buildOrder, pSz.X, pSz.Y, pSz.Z))
+                            end
                             S.skipBlock = false
                             task.wait(0.05)
+
+                            -- ── ROLLING-CHECK: every 10 bricks, re-verify the last 10 ──────
+                            -- Catches size drift and placement dropouts while the build is
+                            -- still in progress, before downstream bricks chain off a wrong
+                            -- anchor. Runs shrink-first to avoid growing into neighbours.
+                            -- Missing bricks are recovered via face-attach off the nearest
+                            -- live placed brick (same logic as Tier 2 pass E below).
+                            if shapeEv and orderIdx % 10 == 0 then
+                                local startIdx = math.max(1, orderIdx - 9)
+                                for chkOff = startIdx, orderIdx do
+                                    if S.buildStopped then break end
+                                    local chkEntry  = buildOrder[chkOff]
+                                    if not chkEntry then break end
+                                    local chkMIdx   = chkEntry[1]
+                                    local chkMeta   = shapedMeta[chkMIdx]
+                                    local chkTSz    = chkMeta.targetSize
+                                    local chkPart   = builtPart[chkMIdx]
+
+                                    -- Missing brick → face-attach recovery (inline, before
+                                    -- rebuildMissingBrick is declared; duplicate logic here
+                                    -- so the D loop stays self-contained).
+                                    if not chkPart or not chkPart.Parent then
+                                        LOG("Load", string.format(
+                                            "  ROLL@%d: brick idx=%d MISSING — attempting face-attach.",
+                                            orderIdx, chkMIdx))
+                                        btn.Text = string.format(
+                                            "Roll@%d miss idx=%d", orderIdx, chkMIdx)
+                                        -- Find closest live placed brick
+                                        local tgtPos2  = chkMeta.rawCenter
+                                        local cAnchor, cBestD = nil, math.huge
+                                        for mI2, bp2 in pairs(builtPart) do
+                                            if bp2 and bp2.Parent then
+                                                local d2 = (bp2.Position - tgtPos2).Magnitude
+                                                if d2 < cBestD then cBestD=d2; cAnchor=bp2 end
+                                            end
+                                        end
+                                        if cAnchor then
+                                            local diff2     = tgtPos2 - cAnchor.Position
+                                            local cBestFace = Enum.NormalId.Top
+                                            local cBestDot  = -math.huge
+                                            for faceR, normR in pairs(FACE_NORM) do
+                                                local dot2 = diff2:Dot(normR)
+                                                if dot2 > cBestDot then
+                                                    cBestDot = dot2; cBestFace = faceR
+                                                end
+                                            end
+                                            local normC  = FACE_NORM[cBestFace] or Vector3.new(0,1,0)
+                                            local axC    = FACE_AX[cBestFace]   or "Y"
+                                            local fcC    = cAnchor.Position + normC * (cAnchor.Size[axC]/2)
+                                            -- Face-attach is infinite range — no teleport needed.
+                                            lastBuilt = nil
+                                            if not buildEv or not buildEv.Parent then
+                                                buildEv = getToolRemote("Build")
+                                            end
+                                            if buildEv then
+                                                buildEv:FireServer(cAnchor, cBestFace, fcC, "normal")
+                                                local dlRoll = tick() + 1.5
+                                                while not lastBuilt and tick() < dlRoll do
+                                                    task.wait(0.05)
+                                                end
+                                                if lastBuilt then
+                                                    builtPart[chkMIdx] = lastBuilt
+                                                    chkMeta.builtPart  = lastBuilt
+                                                    task.wait(SHAPE_WAIT)
+                                                    -- Shaping IS range-checked: teleport to the
+                                                    -- new brick before firing Shape remotes.
+                                                    local hrpC = lp.Character
+                                                        and lp.Character:FindFirstChild("HumanoidRootPart")
+                                                    if hrpC then
+                                                        hrpC.CFrame = CFrame.new(
+                                                            lastBuilt.Position + Vector3.new(0, 6, 0))
+                                                        task.wait(BUILD_SETTLE)
+                                                    end
+                                                    applyShapeOps(lastBuilt, chkMeta, true)
+                                                    LOG("Load", string.format(
+                                                        "  ROLL@%d: idx=%d recovered OK.",
+                                                        orderIdx, chkMIdx))
+                                                else
+                                                    LOG("Load", string.format(
+                                                        "  ROLL@%d: idx=%d recovery FAILED.",
+                                                        orderIdx, chkMIdx))
+                                                end
+                                            end
+                                        end
+
+                                    -- Size mismatch → re-shape in place
+                                    else
+                                        local cSz = chkPart.Size
+                                        if math.abs(cSz.X - chkTSz.X) > EPS_SPAWN
+                                        or math.abs(cSz.Y - chkTSz.Y) > EPS_SPAWN
+                                        or math.abs(cSz.Z - chkTSz.Z) > EPS_SPAWN then
+                                            LOG("Load", string.format(
+                                                "  ROLL@%d: idx=%d size mismatch (%.0fx%.0fx%.0f) → target (%.0fx%.0fx%.0f) — reshaping.",
+                                                orderIdx, chkMIdx,
+                                                cSz.X, cSz.Y, cSz.Z,
+                                                chkTSz.X, chkTSz.Y, chkTSz.Z))
+                                            btn.Text = string.format(
+                                                "Roll@%d fix idx=%d", orderIdx, chkMIdx)
+                                            local hrpR2 = lp.Character
+                                                and lp.Character:FindFirstChild("HumanoidRootPart")
+                                            if hrpR2 then
+                                                hrpR2.CFrame = CFrame.new(
+                                                    chkPart.Position + Vector3.new(0, 6, 0))
+                                                task.wait(BUILD_SETTLE)
+                                            end
+                                            applyShapeOps(chkPart, chkMeta, true)
+                                            task.wait(0.05)
+                                        end
+                                    end
+                                end -- rolling window loop
+                            end -- if shapeEv and orderIdx % 10 == 0
                             until true
                         end
 
@@ -8592,54 +9004,202 @@ do
                             if hrp2 then hrp2.Anchored = false end
                         end
 
-                        -- ── E: Shape Fix Pass (dynamic rounds up to 5, shrink-first) ────
-                        -- Re-checks every placed shaped brick's size vs target.
-                        -- Applies only the remaining delta (missed increments).
-                        -- shrinkFirst=true prevents growing into a neighbour brick.
-                        -- Stops early once a full pass produces zero corrections.
+                        -- ── E: Shape Fix Pass (rolling inline + full convergence sweeps) ──
+                        --
+                        -- TWO-TIER approach:
+                        --
+                        -- Tier 1 — Rolling inline check (already woven into the D loop above):
+                        --   Every 10 bricks placed, the last 10 builtPart entries are
+                        --   re-checked immediately while they are still hot in memory.
+                        --   Mismatched bricks are re-shaped in place (teleport + applyShapeOps,
+                        --   shrink-first to avoid growing into neighbours).
+                        --   Missing bricks (nil / no Parent) are recovered via face-attach off
+                        --   the closest live placed brick, then shaped to target.
+                        --   This catches single-brick dropouts before they propagate to children
+                        --   that depend on them as BFS anchors.
+                        --
+                        -- Tier 2 — Full convergence sweeps (this block, up to 5 rounds):
+                        --   After the entire D loop finishes, sweep ALL N shaped bricks.
+                        --   Mismatched → shrink-first applyShapeOps.
+                        --   Missing → face-attach off closest live brick + shape.
+                        --   Stops early once a full sweep produces zero corrections.
+                        --   shrinkFirst=true throughout prevents growing into neighbours.
+                        --
+                        -- Shared helpers (used by both tiers):
+                        local EPS_FIX = 0.49
+
+                        -- findClosestLiveBrick(targetPos):
+                        --   Returns the closest BasePart in builtPart[] that is still alive.
+                        --   Used to find a face-attach anchor when a brick is missing.
+                        local function findClosestLiveBrick(targetPos)
+                            local bestDist, bestPart, bestMIdx = math.huge, nil, nil
+                            for mIdx, bp in pairs(builtPart) do
+                                if bp and bp.Parent then
+                                    local d = (bp.Position - targetPos).Magnitude
+                                    if d < bestDist then
+                                        bestDist = d; bestPart = bp; bestMIdx = mIdx
+                                    end
+                                end
+                            end
+                            return bestPart, bestMIdx, bestDist
+                        end
+
+                        -- rebuildMissingBrick(metaIdx2, meta2, label):
+                        --   Attempts to recover a missing shaped brick by face-attaching
+                        --   off the closest live placed brick, waiting for the new part to
+                        --   arrive, then shaping it to target size.
+                        --   Returns the new BasePart on success, nil on failure.
+                        local rebuildLastBuilt = nil
+                        local rebuildConn      = myF.ChildAdded:Connect(function(child)
+                            if child:IsA("BasePart") then rebuildLastBuilt = child end
+                        end)
+
+                        local function rebuildMissingBrick(metaIdx2, meta2, label)
+                            if S.buildStopped then return nil end
+                            local tSz2    = meta2.targetSize
+                            local tgtPos  = meta2.rawCenter
+                            local anchor, _, _ = findClosestLiveBrick(tgtPos)
+                            if not anchor then
+                                LOG("Load", string.format(
+                                    "  %s [idx=%d] SKIP: no live brick to face-attach from.",
+                                    label, metaIdx2))
+                                return nil
+                            end
+                            -- Pick the face of anchor closest to tgtPos
+                            local diff      = tgtPos - anchor.Position
+                            local bestFace  = Enum.NormalId.Top
+                            local bestDot   = -math.huge
+                            for face, norm in pairs(FACE_NORM) do
+                                local dot = diff:Dot(norm)
+                                if dot > bestDot then bestDot = dot; bestFace = face end
+                            end
+                            local norm2      = FACE_NORM[bestFace] or Vector3.new(0,1,0)
+                            local ax2        = FACE_AX[bestFace]   or "Y"
+                            local faceCenter = anchor.Position + norm2 * (anchor.Size[ax2] / 2)
+
+                            LOG("Load", string.format(
+                                "  %s [idx=%d] face-attach off anchor pos=(%.1f,%.1f,%.1f) face=%s → target sz=(%.0fx%.0fx%.0f)",
+                                label, metaIdx2,
+                                anchor.Position.X, anchor.Position.Y, anchor.Position.Z,
+                                tostring(bestFace), tSz2.X, tSz2.Y, tSz2.Z))
+
+                            rebuildLastBuilt = nil
+                            if not buildEv or not buildEv.Parent then
+                                buildEv = getToolRemote("Build")
+                            end
+                            if not buildEv then return nil end
+
+                            -- Face-attach is infinite range — fire directly, no teleport.
+                            buildEv:FireServer(anchor, bestFace, faceCenter, "normal")
+                            local dlR = tick() + 1.5
+                            while not rebuildLastBuilt and tick() < dlR do task.wait(0.05) end
+
+                            local newPart = rebuildLastBuilt
+                            if not newPart or not newPart.Parent then
+                                LOG("Load", string.format(
+                                    "  %s [idx=%d] face-attach FAILED (no ChildAdded within 1.5s).", label, metaIdx2))
+                                return nil
+                            end
+
+                            builtPart[metaIdx2]   = newPart
+                            meta2.builtPart        = newPart
+                            task.wait(SHAPE_WAIT)   -- let inherited size replicate
+                            -- Shaping IS range-checked: teleport to the new brick first.
+                            local hrpR = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                            if hrpR then
+                                hrpR.CFrame = CFrame.new(newPart.Position + Vector3.new(0, 6, 0))
+                                task.wait(BUILD_SETTLE)
+                            end
+                            applyShapeOps(newPart, meta2, true)
+                            LOG("Load", string.format(
+                                "  %s [idx=%d] rebuilt OK, shaped to (%.0fx%.0fx%.0f).",
+                                label, metaIdx2, tSz2.X, tSz2.Y, tSz2.Z))
+                            return newPart
+                        end
+
+                        -- ── Tier 1: Rolling inline check (woven into D loop) ─────────────
+                        -- NOTE: The actual per-10-brick trigger is embedded INSIDE the D loop
+                        -- above (search "ROLLING-CHECK"). This block documents the design and
+                        -- holds the shared helpers; no additional code is needed here.
+
+                        -- ── Tier 2: Full convergence sweeps (up to 5 rounds) ─────────────
                         if shapeEv then
                             for passNum = 1, 5 do
                                 if S.buildStopped then break end
-                                local anyFixed = false
-                                local fixCount = 0
-                                for metaIdx = 1, N do
+                                local anyFixed  = false
+                                local fixCount  = 0
+                                local missCount = 0
+                                for metaIdx2 = 1, N do
                                     repeat
                                     if S.buildStopped then break end
-                                    local part = builtPart[metaIdx]
-                                    if not part or not part.Parent then break end
-                                    local meta2 = shapedMeta[metaIdx]
+                                    local meta2 = shapedMeta[metaIdx2]
                                     local tSz2  = meta2.targetSize
-                                    local EPS   = 0.49
-                                    if math.abs(part.Size.X - tSz2.X) > EPS
-                                    or math.abs(part.Size.Y - tSz2.Y) > EPS
-                                    or math.abs(part.Size.Z - tSz2.Z) > EPS then
+                                    local part2 = builtPart[metaIdx2]
+
+                                    -- ── Missing brick recovery ────────────────────────
+                                    if not part2 or not part2.Parent then
+                                        missCount = missCount + 1
+                                        LOG("Load", string.format(
+                                            "  ShpFix pass %d: brick %d/%d MISSING — attempting face-attach recovery.",
+                                            passNum, metaIdx2, N))
+                                        btn.Text = string.format(
+                                            "ShpFix%d \226\128\148 miss %d/%d", passNum, metaIdx2, N)
+                                        local recovered = rebuildMissingBrick(
+                                            metaIdx2, meta2,
+                                            string.format("ShpFix%d", passNum))
+                                        if recovered then
+                                            anyFixed = true
+                                            fixCount = fixCount + 1
+                                        end
+                                        break
+                                    end
+
+                                    -- ── Size mismatch correction ──────────────────────
+                                    local sz2 = part2.Size
+                                    if math.abs(sz2.X - tSz2.X) > EPS_FIX
+                                    or math.abs(sz2.Y - tSz2.Y) > EPS_FIX
+                                    or math.abs(sz2.Z - tSz2.Z) > EPS_FIX then
                                         anyFixed = true
                                         fixCount = fixCount + 1
                                         LOG("Load", string.format(
                                             "  ShpFix pass %d brick %d/%d: sz=(%.2f,%.2f,%.2f) target=(%.0f,%.0f,%.0f) delta=(%.2f,%.2f,%.2f)",
-                                            passNum, metaIdx, N,
-                                            part.Size.X, part.Size.Y, part.Size.Z,
+                                            passNum, metaIdx2, N,
+                                            sz2.X, sz2.Y, sz2.Z,
                                             tSz2.X, tSz2.Y, tSz2.Z,
-                                            tSz2.X - part.Size.X,
-                                            tSz2.Y - part.Size.Y,
-                                            tSz2.Z - part.Size.Z))
+                                            tSz2.X - sz2.X,
+                                            tSz2.Y - sz2.Y,
+                                            tSz2.Z - sz2.Z))
                                         btn.Text = string.format(
-                                            "ShpFix%d \226\128\148 %d/%d", passNum, metaIdx, N)
-                                        applyShapeOps(part, meta2, true)
+                                            "ShpFix%d \226\128\148 %d/%d", passNum, metaIdx2, N)
+                                        -- Teleport to the brick before re-shaping so the
+                                        -- Shape remote's range check passes for large builds.
+                                        local hrpF = lp.Character
+                                            and lp.Character:FindFirstChild("HumanoidRootPart")
+                                        if hrpF then
+                                            hrpF.CFrame   = CFrame.new(part2.Position
+                                                + Vector3.new(0, 6, 0))
+                                            task.wait(BUILD_SETTLE)
+                                        end
+                                        applyShapeOps(part2, meta2, true)
                                         task.wait(0.05)
                                     end
                                     until true
                                 end
-                                if fixCount > 0 then
-                                    LOG("Load", string.format("  ShpFix pass %d: fixed %d brick(s).", passNum, fixCount))
+                                if fixCount > 0 or missCount > 0 then
+                                    LOG("Load", string.format(
+                                        "  ShpFix pass %d: fixed %d brick(s), recovered %d missing.",
+                                        passNum, fixCount, missCount))
                                 end
                                 if not anyFixed then
-                                    LOG("Load", string.format("  ShpFix converged after %d pass(es).", passNum))
+                                    LOG("Load", string.format(
+                                        "  ShpFix converged after %d pass(es).", passNum))
                                     break
                                 end
                                 task.wait(0.12)
                             end
                         end
+
+                        rebuildConn:Disconnect()
 
                         if missingShape > 0 then
                             LOG("Load", string.format("Phase 2/3: DONE with %d FAILED brick(s). See dumps above.", missingShape))
@@ -8979,7 +9539,7 @@ do
 
                 if hasPropWork then
                     btn.Text = "Properties..."
-                    LOG("Load", "Phase 5: Property Phase \u2014 applying CanCollide / Anchored toggles.")
+                    LOG("Load", "Phase 5: Property Phase \u{2014} applying CanCollide / Anchored toggles.")
 
                     local function getPropMismatches(partList)
                         local mismatches = {}
@@ -9121,6 +9681,56 @@ do
             btn.Text = "Load Build"
         end)
     end)
+
+    -- Register the Load Build Live Preview refresh callback
+    -- Shows a bounding-box ghost at the target origin (player pos or seeder) + offset
+    _loadPreviewRefresh = function()
+        if not S.livePreview then return end
+        if S.saveName == "" or S.saveName == "(no saves)" then return end
+        local path = "SigmaPanel_Builds/"..S.saveName..".json"
+        if typeof(isfile) ~= "function" or not isfile(path) then return end
+        if typeof(readfile) ~= "function" then return end
+        local ok, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+        if not ok or not data or type(data) ~= "table" or #data == 0 then return end
+
+        -- Compute bounding box of the save's positions
+        local minP = Vector3.new(math.huge, math.huge, math.huge)
+        local maxP = Vector3.new(-math.huge, -math.huge, -math.huge)
+        local count = 0
+        for _, v in ipairs(data) do
+            local px = v.p and v.p[1]; local py = v.p and v.p[2]; local pz = v.p and v.p[3]
+            if px then
+                local sz = v.s or {4,4,4}
+                local cx = px + sz[1]/2 - 0.5
+                local cy = py + sz[2]/2 - 0.5
+                local cz = pz + sz[3]/2 - 0.5
+                minP = Vector3.new(math.min(minP.X,cx), math.min(minP.Y,cy), math.min(minP.Z,cz))
+                maxP = Vector3.new(math.max(maxP.X,cx), math.max(maxP.Y,cy), math.max(maxP.Z,cz))
+                count = count + 1
+            end
+        end
+        if count == 0 then return end
+
+        -- Determine where the save's centroid would land (player pos or seeder)
+        local char = lp.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local seederPos = S.seeder and S.seeder.Parent and S.seeder.Position
+        local baseOrigin = seederPos and snapToGrid(seederPos + Vector3.new(0, GRID_MULT, 0))
+                                     or snapToGrid(hrp.Position)
+        baseOrigin = baseOrigin + S._previewOffset
+
+        -- Save-relative span
+        local spanX = maxP.X - minP.X + GRID_MULT
+        local spanY = maxP.Y - minP.Y + GRID_MULT
+        local spanZ = maxP.Z - minP.Z + GRID_MULT
+
+        local parts = makePreviewBox(baseOrigin, math.ceil(spanX/GRID_MULT), math.ceil(spanY/GRID_MULT), math.ceil(spanZ/GRID_MULT), GRID_MULT)
+        local cx = baseOrigin.X + spanX/2
+        local cy = baseOrigin.Y + spanY/2
+        local cz = baseOrigin.Z + spanZ/2
+        _spawnLivePreview(parts, Vector3.new(cx, cy, cz))
+    end
 
     makeButton(g,"Delete Save",function(btn)
         if S.saveName == "" or S.saveName == "(no saves)" then return end
@@ -9376,6 +9986,352 @@ do -- Save Repstorage
         btn.Text="Copied!"
     end)
 end
+
+-- ═══════════════════════════════════════════════════════════════
+-- ═══ TAB: AI AGENT (sub-tab of OP) ════════════════════════════
+-- ═══════════════════════════════════════════════════════════════
+do -- ╔═ AI AGENT SCOPE ══╗
+
+-- ── Game context snapshot ──────────────────────────────────────
+local function _aiGetGameContext()
+    local LP = game:GetService("Players").LocalPlayer
+    local parts = {}
+
+    -- Basic player/game info
+    table.insert(parts, "Game: " .. tostring(game.Name) .. " (PlaceId " .. tostring(game.PlaceId) .. ")")
+    table.insert(parts, "Player: " .. LP.Name .. " (UserId " .. tostring(LP.UserId) .. ")")
+
+    -- Character state
+    local char = LP.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hrp then
+            local p = hrp.Position
+            table.insert(parts, ("Pos: %.1f, %.1f, %.1f"):format(p.X, p.Y, p.Z))
+        end
+        if hum then
+            table.insert(parts, ("Health: %.0f/%.0f  WalkSpeed: %.0f  JumpPower: %.0f"):format(
+                hum.Health, hum.MaxHealth, hum.WalkSpeed, hum.JumpPower))
+        end
+    else
+        table.insert(parts, "Character: not spawned")
+    end
+
+    -- Players in server
+    local playerNames = {}
+    for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+        table.insert(playerNames, p.Name)
+    end
+    table.insert(parts, "Players in server: " .. table.concat(playerNames, ", "))
+
+    -- Workspace bricks (TCO context — RepStorage.Brick proxy)
+    pcall(function()
+        local rb = game:GetService("ReplicatedStorage"):FindFirstChild("Brick")
+        if rb then
+            table.insert(parts, "RepStorage.Brick exists (Material=" .. tostring(rb.Material)
+                .. ", Color=" .. tostring(rb.BrickColor) .. ", Size=" .. tostring(rb.Size) .. ")")
+        end
+    end)
+
+    -- Sigma Panel state summary
+    table.insert(parts, "SigmaPanel v4.7.0a — S.livePreview=" .. tostring(S.livePreview)
+        .. " S.movePreview=" .. tostring(S.movePreview))
+
+    return table.concat(parts, "\n")
+end
+
+-- ── HTTP helper (executor-agnostic) ───────────────────────────
+local _aiHttpRequest = (syn and syn.request)
+    or (http and http.request)
+    or http_request
+    or (typeof(request) == "function" and request)
+    or (fluxus and fluxus.request)
+    or nil
+
+-- ── State ──────────────────────────────────────────────────────
+local _aiConversation = {}   -- {role, content}
+local _aiIsTyping     = false
+local _aiMsgOrder     = 0
+
+local GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+local GROQ_MODEL = "llama-3.3-70b-versatile"
+local GROQ_KEY   = "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"
+
+local AI_SYSTEM_PROMPT = [[You are Sigma AI, an expert assistant embedded in the Sigma Panel v4.7.0a, a Luau executor/admin panel for the Roblox game TCO (The Chosen One). You have full context about the game environment provided at the start of each message. You can:
+- Answer questions about the current game state, players, and environment
+- Write and explain Luau/Roblox scripts that execute inside TCO
+- Help debug Sigma Panel features (Build Cube, Build Text, Kill Aura, Pass Fix, Live Preview, etc.)
+- Advise on TCO mechanics, the two-path build system (terrain-ref vs brick-ref), RepStorage.Brick
+- Generate ready-to-execute code blocks wrapped in ```lua fences
+Keep responses concise (under 250 words). Be direct and technically precise.]]
+
+-- ── UI Build ───────────────────────────────────────────────────
+local _aiG = makeGroup(aiAgentPage, "Sigma AI Agent", "AI assistant with live game context. Reads current game state, players, and Sigma panel state.")
+
+-- Status label
+local _aiStatusLbl = makeLabel(_aiG, "\226\151\143 Initialising...")  -- ◯
+_aiStatusLbl.TextColor3 = T.ACCENT
+onTheme(function(th) _aiStatusLbl.TextColor3 = th.ACCENT end)
+
+-- Scrolling chat area (frame + inner list)
+local _aiChatOuter = Instance.new("Frame")
+_aiChatOuter.Size = UDim2.new(1, -8, 0, 220)
+_aiChatOuter.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
+_aiChatOuter.BorderColor3 = T.BORDER
+_aiChatOuter.ZIndex = 8
+_aiChatOuter.ClipsDescendants = true
+_aiChatOuter.Parent = _aiG
+onTheme(function(th) _aiChatOuter.BorderColor3 = th.BORDER end)
+
+local _aiScroll = Instance.new("ScrollingFrame")
+_aiScroll.Size = UDim2.new(1, 0, 1, 0)
+_aiScroll.BackgroundTransparency = 1
+_aiScroll.BorderSizePixel = 0
+_aiScroll.ScrollBarThickness = 3
+_aiScroll.ScrollBarImageColor3 = T.ACCENT
+_aiScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+_aiScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+_aiScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+_aiScroll.ZIndex = 8
+_aiScroll.Parent = _aiChatOuter
+onTheme(function(th) _aiScroll.ScrollBarImageColor3 = th.ACCENT end)
+
+local _aiList = Instance.new("UIListLayout")
+_aiList.SortOrder = Enum.SortOrder.LayoutOrder
+_aiList.Padding = UDim.new(0, 3)
+_aiList.Parent = _aiScroll
+local _aiPad = Instance.new("UIPadding", _aiScroll)
+_aiPad.PaddingTop = UDim.new(0, 4)
+_aiPad.PaddingLeft = UDim.new(0, 4)
+_aiPad.PaddingRight = UDim.new(0, 4)
+_aiPad.PaddingBottom = UDim.new(0, 4)
+
+-- Helper: scroll chat to bottom
+local function _aiScrollBottom()
+    task.defer(function()
+        task.wait(0.05)
+        _aiScroll.CanvasPosition = Vector2.new(0, _aiScroll.AbsoluteCanvasSize.Y)
+    end)
+end
+
+-- Helper: append a chat bubble
+local function _aiAddBubble(text, role)
+    _aiMsgOrder = _aiMsgOrder + 1
+    local isUser = (role == "user")
+
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 0)
+    row.AutomaticSize = Enum.AutomaticSize.Y
+    row.BackgroundTransparency = 1
+    row.LayoutOrder = _aiMsgOrder
+    row.ZIndex = 9
+    row.Parent = _aiScroll
+
+    local bub = Instance.new("Frame")
+    bub.Size = UDim2.new(0.88, 0, 0, 0)
+    bub.AutomaticSize = Enum.AutomaticSize.Y
+    bub.Position = isUser and UDim2.new(0.12, 0, 0, 0) or UDim2.new(0, 0, 0, 0)
+    bub.BackgroundColor3 = isUser and Color3.fromRGB(30, 50, 30) or Color3.fromRGB(18, 18, 28)
+    bub.BorderColor3 = isUser and T.ACCENT or T.BORDER
+    bub.ZIndex = 9
+    bub.Parent = row
+    onTheme(function(th)
+        bub.BorderColor3 = isUser and th.ACCENT or th.BORDER
+    end)
+
+    local bPad = Instance.new("UIPadding", bub)
+    bPad.PaddingTop = UDim.new(0, 4)
+    bPad.PaddingBottom = UDim.new(0, 4)
+    bPad.PaddingLeft = UDim.new(0, 6)
+    bPad.PaddingRight = UDim.new(0, 6)
+    local bList = Instance.new("UIListLayout", bub)
+    bList.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local whoLbl = Instance.new("TextLabel")
+    whoLbl.Size = UDim2.new(1, 0, 0, 12)
+    whoLbl.BackgroundTransparency = 1
+    whoLbl.Text = isUser and ("[ " .. game:GetService("Players").LocalPlayer.Name .. " ]") or "[ Sigma AI ]"
+    whoLbl.TextColor3 = isUser and T.ACCENT or Color3.fromRGB(100, 220, 130)
+    whoLbl.FontFace = FONT_MAIN
+    whoLbl.TextSize = 10
+    whoLbl.TextXAlignment = Enum.TextXAlignment.Left
+    whoLbl.ZIndex = 10
+    whoLbl.LayoutOrder = 1
+    whoLbl.Parent = bub
+    onTheme(function(th) if isUser then whoLbl.TextColor3 = th.ACCENT end end)
+
+    local msgLbl = Instance.new("TextLabel")
+    msgLbl.Size = UDim2.new(1, 0, 0, 0)
+    msgLbl.AutomaticSize = Enum.AutomaticSize.Y
+    msgLbl.BackgroundTransparency = 1
+    msgLbl.Text = text
+    msgLbl.TextColor3 = T.WHITE
+    msgLbl.FontFace = FONT_MAIN
+    msgLbl.TextSize = 11
+    msgLbl.TextWrapped = true
+    msgLbl.TextXAlignment = Enum.TextXAlignment.Left
+    msgLbl.ZIndex = 10
+    msgLbl.LayoutOrder = 2
+    msgLbl.Parent = bub
+    onTheme(function(th) msgLbl.TextColor3 = th.WHITE end)
+
+    _aiScrollBottom()
+    return msgLbl
+end
+
+-- Helper: clear chat
+local function _aiClearChat()
+    for _, c in ipairs(_aiScroll:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    _aiConversation = {}
+    _aiMsgOrder = 0
+end
+
+-- Helper: call Groq, fallback to error message
+local function _aiCallGroq(userMsg)
+    -- Build context-injected user message
+    local ctx = _aiGetGameContext()
+    local fullUserMsg = "[GAME CONTEXT]\n" .. ctx .. "\n\n[USER]\n" .. userMsg
+
+    local messages = {{role = "system", content = AI_SYSTEM_PROMPT}}
+    local startIdx = math.max(1, #_aiConversation - 18)
+    for i = startIdx, #_aiConversation do
+        table.insert(messages, _aiConversation[i])
+    end
+    table.insert(messages, {role = "user", content = fullUserMsg})
+
+    if not _aiHttpRequest then
+        return "[No HTTP function detected. Run in an executor with request() support (Synapse, Fluxus, etc.)]"
+    end
+
+    local ok, result = pcall(function()
+        local body = game:GetService("HttpService"):JSONEncode({
+            model = GROQ_MODEL,
+            messages = messages,
+            max_tokens = 512,
+            temperature = 0.7,
+        })
+        local resp = _aiHttpRequest({
+            Url = GROQ_URL,
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["Authorization"] = "Bearer " .. GROQ_KEY,
+            },
+            Body = body,
+        })
+        if resp.StatusCode == 200 then
+            local data = game:GetService("HttpService"):JSONDecode(resp.Body)
+            if data.choices and data.choices[1] then
+                return data.choices[1].message.content
+            end
+        end
+        return "[API error " .. tostring(resp.StatusCode) .. "]"
+    end)
+
+    if ok then return result end
+    return "[Request failed: " .. tostring(result) .. "]"
+end
+
+-- Send handler
+local function _aiSend(inputBox)
+    local text = inputBox.Text
+    if text == "" or _aiIsTyping then return end
+    text = text:sub(1, 600)
+    inputBox.Text = ""
+
+    table.insert(_aiConversation, {role = "user", content = text})
+    _aiAddBubble(text, "user")
+
+    _aiIsTyping = true
+    _aiStatusLbl.Text = "\226\151\129 Thinking..."  -- ◉
+
+    -- Typing placeholder
+    local typeLbl = _aiAddBubble("...", "assistant")
+
+    task.spawn(function()
+        local response = _aiCallGroq(text)
+        response = response:sub(1, 800)
+        table.insert(_aiConversation, {role = "assistant", content = response})
+
+        -- Typewriter into placeholder label
+        typeLbl.Text = ""
+        for i = 1, #response do
+            typeLbl.Text = response:sub(1, i)
+            _aiScrollBottom()
+            local ch = response:sub(i, i)
+            if ch == "." or ch == "!" or ch == "?" then task.wait(0.035)
+            elseif ch == "," then task.wait(0.018)
+            else task.wait(0.007) end
+        end
+
+        _aiIsTyping = false
+        _aiStatusLbl.Text = "\226\151\143 Ready"  -- ◯
+
+        -- Trim history
+        while #_aiConversation > 40 do table.remove(_aiConversation, 1) end
+    end)
+end
+
+-- ── Input row ──────────────────────────────────────────────────
+local _aiInputRow = Instance.new("Frame")
+_aiInputRow.Size = UDim2.new(1, -8, 0, 22)
+_aiInputRow.BackgroundTransparency = 1
+_aiInputRow.ZIndex = 8
+_aiInputRow.Parent = _aiG
+
+local _aiInputBox = Instance.new("TextBox")
+_aiInputBox.Size = UDim2.new(1, -52, 0, 18)
+_aiInputBox.Position = UDim2.new(0, 2, 0.5, -9)
+_aiInputBox.BackgroundColor3 = Color3.new(0, 0, 0)
+_aiInputBox.BorderColor3 = T.BORDER
+_aiInputBox.Text = ""
+_aiInputBox.PlaceholderText = "Ask Sigma AI..."
+_aiInputBox.PlaceholderColor3 = Color3.fromRGB(80, 80, 80)
+_aiInputBox.TextColor3 = T.WHITE
+_aiInputBox.FontFace = FONT_MAIN
+_aiInputBox.TextSize = 11
+_aiInputBox.ClearTextOnFocus = false
+_aiInputBox.ZIndex = 9
+_aiInputBox.Parent = _aiInputRow
+onTheme(function(th) _aiInputBox.BorderColor3 = th.BORDER; _aiInputBox.TextColor3 = th.WHITE end)
+
+local _aiSendBtn = Instance.new("TextButton")
+_aiSendBtn.Size = UDim2.new(0, 44, 0, 18)
+_aiSendBtn.Position = UDim2.new(1, -46, 0.5, -9)
+_aiSendBtn.BackgroundColor3 = T.BTN
+_aiSendBtn.BorderColor3 = T.BORDER
+_aiSendBtn.Text = "Send"
+_aiSendBtn.TextColor3 = T.WHITE
+_aiSendBtn.FontFace = FONT_MAIN
+_aiSendBtn.TextSize = 11
+_aiSendBtn.ZIndex = 9
+_aiSendBtn.Parent = _aiInputRow
+onTheme(function(th) _aiSendBtn.BackgroundColor3 = th.BTN; _aiSendBtn.BorderColor3 = th.BORDER; _aiSendBtn.TextColor3 = th.WHITE end)
+
+_aiSendBtn.MouseButton1Click:Connect(function() _aiSend(_aiInputBox) end)
+_aiInputBox.FocusLost:Connect(function(enter) if enter then _aiSend(_aiInputBox) end end)
+
+-- Clear button
+local _, _aiClearBtn = makeButton(_aiG, "Clear Chat", function()
+    _aiClearChat()
+    _aiStatusLbl.Text = "\226\151\143 Ready"
+end)
+
+-- Context snapshot button
+local _, _aiCtxBtn = makeButton(_aiG, "Snapshot Game Context", function(btn)
+    local ctx = _aiGetGameContext()
+    notify("Sigma AI", "Context copied to clipboard!")
+    pcall(function() setclipboard(ctx) end)
+    btn.Text = "Copied!"
+end)
+
+-- Status init
+_aiStatusLbl.Text = _aiHttpRequest and "\226\151\143 Ready (HTTP OK)" or "\226\151\131 No HTTP (fallback only)"
+
+end -- ╚═ AI AGENT SCOPE ══╝
 
 -- ═══════════════════════════════════════════════════════════════
 -- ═══ TAB: DEPOSITS (created here — used immediately below) ═════
@@ -9676,7 +10632,7 @@ do
     end)
 
     -- ── Instant fun buttons (no delay, fire-and-forget coroutines) ────────
-    makeButton(g, "\240\159\140\136  Instant Rainbow (scope)", function()
+    makeButton(g, "🌈  Instant Rainbow (scope)", function()
         if _cpPainting then notify("Sigma","Stop current paint first."); return end
         local pb = _cpGetBucket()
         if not pb then notify("Sigma","PaintBucket not found!"); return end
@@ -10218,8 +11174,8 @@ do
                 local iqSuffix=""
                 local iq=plr:GetAttribute("IQ")
                 if type(iq)=="number" then
-                    if     iq>=200 then cn="iqgenius"; iqSuffix=" \240\159\167\160"  -- \240\159\167\160 
-                    elseif iq<=50  then cn="iqdumb";   iqSuffix=" \240\159\164\170"  -- \240\159\164\170
+                    if     iq>=200 then cn="iqgenius"; iqSuffix=" \240\159\167\160"  -- 🧠 
+                    elseif iq<=50  then cn="iqdumb";   iqSuffix=" \240\159\164\170"  -- 🤪
                     end
                 end
                 local hex=CHAT_ROLE_COLORS[cn] or "#ffffff"
@@ -10475,7 +11431,7 @@ end
 
 do
     local g=makeGroup(tcoPage,"Server","Server connection utilities.")
-    makeButton(g,"\240\159\148\132 Rejoin",function()
+    makeButton(g,"🔄 Rejoin",function()
         prepareKeep()  -- arm queue_on_teleport BEFORE the teleport fires (Dev Rule: always prepareKeep before any TeleportService call)
         pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp)
@@ -11181,7 +12137,7 @@ local function makeRadOverlay(titleText, totalSteps, stoppedRef)
     tipLbl.TextColor3 = Color3.fromRGB(195, 195, 195)
     tipLbl.TextXAlignment = Enum.TextXAlignment.Left
     tipLbl.TextWrapped = true
-    tipLbl.Text = "\240\159\146\161 " .. RAD_TIPS[math.random(1, #RAD_TIPS)]
+    tipLbl.Text = "💡 " .. RAD_TIPS[math.random(1, #RAD_TIPS)]
     tipLbl.Parent = frame
 
     local barBg = Instance.new("Frame")
@@ -11226,7 +12182,7 @@ local function makeRadOverlay(titleText, totalSteps, stoppedRef)
             task.wait(4.5)
             tipIdx = (tipIdx % #RAD_TIPS) + 1
             if tipLbl and tipLbl.Parent then
-                tipLbl.Text = "\240\159\146\161 " .. RAD_TIPS[tipIdx]
+                tipLbl.Text = "💡 " .. RAD_TIPS[tipIdx]
             end
         end
     end)
@@ -12384,25 +13340,18 @@ end
 do
     local dbgPage = dbgPage_ref
     local g5 = makeGroup(dbgPage, "BlitzBuild Speed Test",
-        "Builds 10 consecutive 3x3x3 cubes at increasing speeds. "..
-        "Cubes 1-5: step down 0.5->0.1s/brick. Cubes 6-10: step down 0.09->0.05s/brick (~20 bricks/sec). "..
-        "Logs repeat-blitz count per cube to output.")
+        "Builds 10 consecutive 3×3×3 cubes (27 bricks each) at increasing BPS. "..
+        "Starts at 20 bps, steps +3 bps per cube up to 47 bps. "..
+        "Outputs per-cube time, fix-pass count, and a final BPS vs passes comparison table.")
 
-    -- Schedule: {delay_seconds_per_brick, bricks_per_second_label}
-    -- Cubes 1-5: 0.5 -> 0.1 s/brick (2 -> 10 bps, steps of 0.1)
-    -- Cubes 6-10: 0.09 -> 0.05 s/brick (11 -> 20 bps, steps of 0.01)
-    local SPEED_SCHEDULE = {
-        {0.500,  2.0},
-        {0.400,  2.5},
-        {0.300,  3.3},
-        {0.200,  5.0},
-        {0.100, 10.0},
-        {0.090, 11.1},
-        {0.080, 12.5},
-        {0.070, 14.3},
-        {0.060, 16.7},
-        {0.050, 20.0},
-    }
+    -- Schedule: 20 bps → 47 bps in steps of 3
+    -- delay_s = 1 / bps (time between consecutive FireServer calls)
+    local SPEED_SCHEDULE = {}
+    for i = 0, 9 do
+        local bps     = 20 + i * 3          -- 20, 23, 26, 29, 32, 35, 38, 41, 44, 47
+        local delay_s = 1 / bps
+        SPEED_SCHEDULE[i + 1] = {delay_s, bps}
+    end
 
     local _blitzTestRunning = false
     local btn5 = makeButton(g5, "Test BlitzBuild Speed", function()
@@ -12423,12 +13372,10 @@ do
                 return
             end
 
-            -- Build probe for 4x4x4 normal bricks
+            -- Build probe for 4×4×4 normal bricks
             local probeBox = Vector3.new(3, 3, 3)
 
-            -- We build each 3x3x3 cube (27 bricks) at a fixed offset from HRP
-            -- so the cubes don't stack on top of each other and are within reach.
-            -- Each cube is offset 20 studs further along X from the previous.
+            -- Each cube offset 20 studs along X from the previous
             local basePos = hrp.Position + Vector3.new(10, 0, 0)
 
             -- Acquire Build remote
@@ -12440,20 +13387,28 @@ do
                 return
             end
 
-            print("[BlitzTest] Starting BlitzBuild speed test — 10 cubes, 27 bricks each.")
+            print("[BlitzTest] ══════════════════════════════════════════════")
+            print("[BlitzTest] BlitzBuild speed test — 10 cubes, 27 bricks each.")
+            print("[BlitzTest] Schedule: 20 bps → 47 bps (step +3). Starting.")
+            print("[BlitzTest] ══════════════════════════════════════════════")
+
+            -- Results table accumulated for the final comparison printout.
+            -- Each entry: {cubeIdx, bps, elapsed_s, repeatCount, firstPassMisses}
+            local results = {}
 
             for cubeIdx, schedule in ipairs(SPEED_SCHEDULE) do
                 if S.buildStopped then break end
 
-                local delay_s  = schedule[1]
-                local bps      = schedule[2]
+                local delay_s = schedule[1]
+                local bps     = schedule[2]
+
                 local cubeOrigin = Vector3.new(
                     basePos.X + (cubeIdx - 1) * 20,
                     basePos.Y,
                     basePos.Z
                 )
 
-                -- Generate 3x3x3 = 27 normal brick positions (4-stud grid)
+                -- Generate 3×3×3 = 27 normal brick positions (4-stud grid)
                 local positions = {}
                 for dx = 0, 2 do
                     for dy = 0, 2 do
@@ -12480,19 +13435,20 @@ do
                 hrp.Anchored = true
 
                 if btn5 and btn5.Parent then
-                    btn5.Text = string.format("Cube %d/10 @ %.1f bps", cubeIdx, bps)
+                    btn5.Text = string.format("Cube %d/10 @ %d bps", cubeIdx, bps)
                 end
 
-                -- Fire bricks one at a time at the requested rate
+                -- ── Primary fire pass ─────────────────────────────────────────
+                local cubeStart = tick()
+
                 for _, pos in ipairs(positions) do
                     if S.buildStopped then break end
                     ev:FireServer(Workspace.Terrain, Enum.NormalId.Top, pos, "normal")
                     task.wait(delay_s)
                 end
 
-                -- Verify — count holes and repeat-blitz until full
+                -- ── Verify + fix passes ───────────────────────────────────────
                 task.wait(BUILD_VERIFY_WAIT)
-                local repeatCount = 0
 
                 local function collectHoles()
                     local holes = {}
@@ -12502,18 +13458,25 @@ do
                     return holes
                 end
 
-                local holes = collectHoles()
+                local holes           = collectHoles()
+                local firstPassMisses = #holes   -- how many were missing after the initial fire
+                local repeatCount     = 0
+
                 while #holes > 0 do
                     repeatCount = repeatCount + 1
-                    -- Re-acquire remote if needed
                     if not ev or not ev.Parent then ev = getToolRemote("Build") end
                     if not ev then break end
 
+                    if btn5 and btn5.Parent then
+                        btn5.Text = string.format(
+                            "Cube %d fix-%d (%d miss)", cubeIdx, repeatCount, #holes)
+                    end
+
                     print(string.format(
-                        "[BlitzTest] Cube %d @ %.1f bps — pass %d: %d missing bricks, re-blitzing...",
+                        "[BlitzTest] Cube %d @ %d bps — fix pass %d: %d missing, re-blitzing...",
                         cubeIdx, bps, repeatCount, #holes))
 
-                    -- Fire holes in shuffled order (same as blitzBuild pattern)
+                    -- Shuffle holes for spatial locality variety
                     for i = #holes, 2, -1 do
                         local j = math.random(1, i)
                         holes[i], holes[j] = holes[j], holes[i]
@@ -12527,31 +13490,65 @@ do
                     holes = collectHoles()
                 end
 
-                hrp.Anchored = false
+                local elapsed = tick() - cubeStart
+                hrp.Anchored  = false
 
-                -- Report result
+                -- Store result
+                results[#results+1] = {cubeIdx, bps, elapsed, repeatCount, firstPassMisses}
+
+                -- Per-cube log line
                 if repeatCount == 0 then
-                    local msg = string.format(
-                        "[BlitzTest] Cube %d @ %.1f bps (%.3fs/brick) — CLEAN. No repeat needed.",
-                        cubeIdx, bps, delay_s)
-                    print(msg)
+                    print(string.format(
+                        "[BlitzTest] Cube %2d | %2d bps | %.2fs | CLEAN (0 fix passes, 0 misses on first pass)",
+                        cubeIdx, bps, elapsed))
                     notify("BlitzTest",
-                        string.format("Cube %d @ %.1fbps — Built clean! \226\156\147", cubeIdx, bps), 4)
+                        string.format("Cube %d @ %dbps — clean! %.2fs", cubeIdx, bps, elapsed), 4)
                 else
-                    local msg = string.format(
-                        "[BlitzTest] Cube %d @ %.1f bps (%.3fs/brick) — needed %d repeat pass(es).",
-                        cubeIdx, bps, delay_s, repeatCount)
-                    print(msg)
+                    print(string.format(
+                        "[BlitzTest] Cube %2d | %2d bps | %.2fs | %d fix pass(es) | %d miss(es) on first pass",
+                        cubeIdx, bps, elapsed, repeatCount, firstPassMisses))
                     notify("BlitzTest",
-                        string.format("Cube %d @ %.1fbps — %d repeat(s) needed.", cubeIdx, bps, repeatCount), 4)
+                        string.format("Cube %d @ %dbps — %d fix(es), %.2fs", cubeIdx, bps, repeatCount, elapsed), 4)
                 end
 
                 -- Gap between cubes
                 task.wait(0.5)
             end
 
-            print("[BlitzTest] Speed test complete. Check output for full breakdown.")
-            notify("BlitzTest", "Speed test done — see output for results.", 6)
+            -- ── Final comparison table ────────────────────────────────────────
+            print("[BlitzTest] ══════════════════════════════════════════════")
+            print("[BlitzTest] FINAL RESULTS — BPS vs Fix Passes per Cube")
+            print("[BlitzTest] ──────────────────────────────────────────────")
+            print(string.format("[BlitzTest] %-6s %-6s %-10s %-12s %-10s",
+                "Cube", "BPS", "Time (s)", "Fix Passes", "1st Misses"))
+            print("[BlitzTest] ──────────────────────────────────────────────")
+            for _, r in ipairs(results) do
+                local cIdx, bps2, elapsed2, passes, misses = r[1], r[2], r[3], r[4], r[5]
+                local passLabel = passes == 0 and "clean" or tostring(passes)
+                print(string.format("[BlitzTest] %-6d %-6d %-10.2f %-12s %-10d",
+                    cIdx, bps2, elapsed2, passLabel, misses))
+            end
+            print("[BlitzTest] ══════════════════════════════════════════════")
+
+            -- Quick trend note
+            local allClean = true
+            local firstDirty = nil
+            for _, r in ipairs(results) do
+                if r[4] > 0 then
+                    allClean = false
+                    if not firstDirty then firstDirty = r end
+                end
+            end
+            if allClean then
+                print("[BlitzTest] All 10 cubes built clean. Server is very healthy at these rates.")
+            else
+                print(string.format(
+                    "[BlitzTest] Fix passes started at cube %d (%d bps). Below that: clean.",
+                    firstDirty[1], firstDirty[2]))
+            end
+
+            print("[BlitzTest] Speed test complete.")
+            notify("BlitzTest", "Speed test done — see output for full table.", 6)
             _blitzTestRunning = false
             if btn5 and btn5.Parent then btn5.Text = "Test BlitzBuild Speed" end
         end)
@@ -13055,7 +14052,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     lbl.Size                 = UDim2.new(1,-4,0,18)
     lbl.Position             = UDim2.new(0,2,0,2)
     lbl.BackgroundTransparency=1
-    lbl.Text                 = "\240\159\142\181 "..name.." · "..id
+    lbl.Text                 = "🎵 "..name.." · "..id
     lbl.TextColor3           = Color3.fromRGB(255,220,80)
     lbl.FontFace             = FONT_MAIN
     lbl.TextSize             = 11
@@ -13081,7 +14078,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     muteBtn.Position         = UDim2.new(1,-56,0.5,-13)
     muteBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
     muteBtn.BorderSizePixel  = 0
-    muteBtn.Text             = "\240\159\148\138"
+    muteBtn.Text             = "🔊"
     muteBtn.TextSize         = 14
     muteBtn.FontFace         = FONT_MAIN
     muteBtn.TextColor3       = Color3.fromRGB(255,255,255)
@@ -13090,14 +14087,14 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     muteBtn.Parent           = bg
 
     local muted = S._boomboxMuted[char] or false
-    if muted then muteBtn.Text="\240\159\148\135"; sound.Volume=0 end
+    if muted then muteBtn.Text="🔇"; sound.Volume=0 end
     muteBtn.MouseButton1Click:Connect(function()
         muted = not muted
         S._boomboxMuted[char] = muted
         if muted then
-            muteBtn.Text="\240\159\148\135"; sound.Volume=0
+            muteBtn.Text="🔇"; sound.Volume=0
         else
-            muteBtn.Text="\240\159\148\138"; sound.Volume=1
+            muteBtn.Text="🔊"; sound.Volume=1
         end
     end)
 
@@ -13108,7 +14105,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     copyBtn.Position         = UDim2.new(1,-28,0.5,-13)
     copyBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
     copyBtn.BorderSizePixel  = 0
-    copyBtn.Text             = "\240\159\147\139"
+    copyBtn.Text             = "📋"
     copyBtn.TextSize         = 14
     copyBtn.FontFace         = FONT_MAIN
     copyBtn.TextColor3       = Color3.fromRGB(255,255,255)
@@ -13119,7 +14116,7 @@ local function _bbMakeBillboard(char, id, duration, name, sound)
     copyBtn.MouseButton1Click:Connect(function()
         local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
         if clip then pcall(function() clip(id) end) end
-        copyBtn.Text="✓"; task.delay(1.2, function() if copyBtn and copyBtn.Parent then copyBtn.Text="\240\159\147\139" end end)
+        copyBtn.Text="✓"; task.delay(1.2, function() if copyBtn and copyBtn.Parent then copyBtn.Text="📋" end end)
         notify("Boombox", "Copied ID: "..id)
     end)
 
@@ -13416,7 +14413,7 @@ do
         local bg = bb and bb:FindFirstChildWhichIsA("Frame")
         if bg then
             local mb = bg:FindFirstChild("MuteBtn")
-            if mb then mb.Text = muted and "\240\159\148\135" or "\240\159\148\138" end
+            if mb then mb.Text = muted and "🔇" or "🔊" end
         end
         notify("Boombox", (muted and "Muted: " or "Unmuted: ")..char.Name)
     end)
@@ -13528,7 +14525,7 @@ do
                 l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left
                 l.TextTruncate=Enum.TextTruncate.AtEnd; l.ZIndex=53
             end
-            rowLbl("\240\159\142\181 "..e.name, Color3.fromRGB(255,220,80))
+            rowLbl("🎵 "..e.name, Color3.fromRGB(255,220,80))
             rowLbl("ID: "..e.id.."  ⏱ "..e.dur, Color3.fromRGB(180,180,200))
             rowLbl("Owner: "..e.owner, Color3.fromRGB(140,200,140))
 
@@ -13541,12 +14538,12 @@ do
             btnLayout.FillDirection = Enum.FillDirection.Horizontal
             btnLayout.Padding = UDim.new(0,3)
 
-            -- \240\159\147\139 Copy ID
+            -- 📋 Copy ID
             local cpBtn = Instance.new("TextButton", btnRow)
             cpBtn.Size = UDim2.new(0,70,1,0)
             cpBtn.BackgroundColor3 = Color3.fromRGB(40,40,55)
             cpBtn.BorderColor3 = T.BORDER
-            cpBtn.Text = "\240\159\147\139 Copy"
+            cpBtn.Text = "📋 Copy"
             cpBtn.TextColor3 = T.WHITE
             cpBtn.FontFace = FONT_MAIN; cpBtn.TextSize = 10
             cpBtn.ZIndex = 54
@@ -13555,12 +14552,12 @@ do
                 cpBtn.MouseButton1Click:Connect(function()
                     local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
                     if clip then pcall(function() clip(eid) end) end
-                    cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="\240\159\147\139 Copy" end end)
+                    cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="📋 Copy" end end)
                     notify("Boombox Log","Copied ID: "..eid)
                 end)
             end
 
-            -- \240\159\148\138 Mute (toggles S._boomboxMuted for the logged char)
+            -- 🔊 Mute (toggles S._boomboxMuted for the logged char)
             local muBtn = Instance.new("TextButton", btnRow)
             muBtn.Size = UDim2.new(0,60,1,0)
             muBtn.BackgroundColor3 = Color3.fromRGB(40,40,55)
@@ -13573,7 +14570,7 @@ do
                 local echar = e.char
                 local function refreshMuteLabel()
                     local muted = echar and S._boomboxMuted[echar]
-                    muBtn.Text = muted and "\240\159\148\135 Muted" or "\240\159\148\138 Mute"
+                    muBtn.Text = muted and "🔇 Muted" or "🔊 Mute"
                     muBtn.BackgroundColor3 = muted and Color3.fromRGB(80,30,30) or Color3.fromRGB(40,40,55)
                 end
                 refreshMuteLabel()
@@ -13594,7 +14591,7 @@ do
                             end
                         end
                     end)
-                    if mb then mb.Text = muted and "\240\159\148\135" or "\240\159\148\138" end
+                    if mb then mb.Text = muted and "🔇" or "🔊" end
                     refreshMuteLabel()
                 end)
             end
@@ -13620,7 +14617,7 @@ do
         tb.BorderSizePixel=0; tb.ZIndex=51
         local tl=Instance.new("TextLabel",tb)
         tl.Size=UDim2.new(1,-26,1,0); tl.Position=UDim2.new(0,6,0,0)
-        tl.BackgroundTransparency=1; tl.Text="\240\159\142\181 Boombox ID Logger"
+        tl.BackgroundTransparency=1; tl.Text="🎵 Boombox ID Logger"
         tl.TextColor3=T.ACCENT; tl.FontFace=FONT_MAIN; tl.TextSize=11
         tl.TextXAlignment=Enum.TextXAlignment.Left; tl.ZIndex=52
         onTheme(function(th) tl.TextColor3=th.ACCENT end)
@@ -14021,7 +15018,7 @@ local function _dcLogRebuildRows()
             l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left
             l.TextTruncate=Enum.TextTruncate.AtEnd; l.ZIndex=53
         end
-        rowLbl("\240\159\150\188 "..e.name, Color3.fromRGB(200,180,255))
+        rowLbl("🖼 "..e.name, Color3.fromRGB(200,180,255))
         rowLbl("ID: "..e.id.."  ["..e.kind.."]", Color3.fromRGB(180,180,200))
         rowLbl("Owner: "..e.owner, Color3.fromRGB(140,200,140))
 
@@ -14033,23 +15030,23 @@ local function _dcLogRebuildRows()
         btnLayout.FillDirection = Enum.FillDirection.Horizontal
         btnLayout.Padding = UDim.new(0,3)
 
-        -- \240\159\147\139 Copy ID
+        -- 📋 Copy ID
         local cpBtn = Instance.new("TextButton", btnRow)
         cpBtn.Size = UDim2.new(0,70,1,0)
         cpBtn.BackgroundColor3 = Color3.fromRGB(40,40,55); cpBtn.BorderColor3 = T.BORDER
-        cpBtn.Text = "\240\159\147\139 Copy"; cpBtn.TextColor3 = T.WHITE
+        cpBtn.Text = "📋 Copy"; cpBtn.TextColor3 = T.WHITE
         cpBtn.FontFace = FONT_MAIN; cpBtn.TextSize = 10; cpBtn.ZIndex = 54
         onTheme(function(th) cpBtn.BorderColor3=th.BORDER; cpBtn.TextColor3=th.WHITE end)
         do local eid = e.id
             cpBtn.MouseButton1Click:Connect(function()
                 local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
                 if clip then pcall(function() clip(eid) end) end
-                cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="\240\159\147\139 Copy" end end)
+                cpBtn.Text="✓ Copied"; task.delay(1.2,function() if cpBtn and cpBtn.Parent then cpBtn.Text="📋 Copy" end end)
                 notify("Decal Log","Copied ID: "..eid)
             end)
         end
 
-        -- \240\159\154\171 Toggle Censor (adds/removes from S._decalBlacklist)
+        -- 🚫 Toggle Censor (adds/removes from S._decalBlacklist)
         local csBtn = Instance.new("TextButton", btnRow)
         csBtn.Size = UDim2.new(0,80,1,0)
         csBtn.BorderColor3 = T.BORDER
@@ -14059,7 +15056,7 @@ local function _dcLogRebuildRows()
             local eid = e.id
             local function refreshCsBtn()
                 local censored = S._decalBlacklist[eid]
-                csBtn.Text = censored and "✅ Uncensor" or "\240\159\154\171 Censor"
+                csBtn.Text = censored and "✅ Uncensor" or "🚫 Censor"
                 csBtn.BackgroundColor3 = censored and Color3.fromRGB(30,55,30) or Color3.fromRGB(55,30,30)
                 csBtn.TextColor3 = censored and Color3.fromRGB(120,220,120) or Color3.fromRGB(220,100,100)
             end
@@ -14096,7 +15093,7 @@ local function _dcLogBuildPanel()
     tb.BorderSizePixel=0; tb.ZIndex=51
     local tl=Instance.new("TextLabel",tb)
     tl.Size=UDim2.new(1,-26,1,0); tl.Position=UDim2.new(0,6,0,0)
-    tl.BackgroundTransparency=1; tl.Text="\240\159\150\188 Decal ID Logger"
+    tl.BackgroundTransparency=1; tl.Text="🖼 Decal ID Logger"
     tl.TextColor3=T.ACCENT; tl.FontFace=FONT_MAIN; tl.TextSize=11
     tl.TextXAlignment=Enum.TextXAlignment.Left; tl.ZIndex=52
     onTheme(function(th) tl.TextColor3=th.ACCENT end)
@@ -14408,7 +15405,7 @@ local function nanoAct(brick)
             ev:FireServer(brick,Enum.NormalId.Top,hrp.Position,"color",col,"plastic","")
         end
     elseif S.nanoMode=="Materialize" then
-        -- Apply both color and material at once with HANDSHAKE ("both \240\159\164\157").
+        -- Apply both color and material at once with HANDSHAKE ("both 🤝").
         local ev=equipAndGetEvent("Paint"); if ev then
             local col=S.nanoMatColor
             if S.nanoMatRainbow then S.nanoMatRainbowH=(S.nanoMatRainbowH+0.03)%1; col=Color3.fromHSV(S.nanoMatRainbowH,1,1) end
@@ -15783,7 +16780,7 @@ do
     info.AutomaticSize=Enum.AutomaticSize.Y; info.BackgroundTransparency=1
     info.TextWrapped=true; info.ZIndex=8; info.Parent=g
     info.Text=[[
-\240\159\155\160  v4.7.2 — QoL + Multi-Chat Edition
+🛠  v4.7.2 — QoL + Multi-Chat Edition
 Lead: 8363hls (rnexeexe)
 
 Whitelisted: masxteng3 · casen62
@@ -16777,9 +17774,28 @@ do
     local cubeSize = 3
     local _,cubeSizeBox = makeInput(g,"Cube Size","e.g. 5",function(v)
         cubeSize = tonumber(v) or 3
+        -- Live-refresh cube preview when size changes
+        if S.livePreview and _cubePreviewRefresh then _cubePreviewRefresh() end
     end)
     local buildMode = "normal"
-    makeDropdown(g,"Block Size",{"normal","detailed"},"normal",function(v) buildMode=v end)
+    makeDropdown(g,"Block Size",{"normal","detailed"},"normal",function(v)
+        buildMode=v
+        if S.livePreview and _cubePreviewRefresh then _cubePreviewRefresh() end
+    end)
+
+    -- ── Live Preview / Move Preview toggles ───────────────────────────────
+    makeToggle(g, "Live Preview", function(on)
+        S.livePreview = on
+        S._previewGenTag = "cube"
+        if on then
+            if _cubePreviewRefresh then _cubePreviewRefresh() end
+        else
+            _clearLivePreview()
+        end
+    end, false)
+    makeToggle(g, "Move Preview", function(on)
+        _setMovePreview(on)
+    end, false)
 
     makeButton(g,"Build Cube",function(btn)
         local char=lp.Character
@@ -16800,6 +17816,10 @@ do
             origin = snapToGrid(char.HumanoidRootPart.Position)
         end
 
+        -- Apply Move Preview offset if active
+        local offset = _getPreviewOffset()
+        origin = origin + offset
+
         -- Build position list and preview
         local posList = {}
         for y=0,cubeSize-1 do for x=0,cubeSize-1 do for z=0,cubeSize-1 do
@@ -16814,11 +17834,14 @@ do
             previewParts = makePreviewBox(origin, cubeSize, cubeSize, cubeSize, grid)
         end
 
+        -- If Live Preview was showing a ghost, tear it down now that we're actually building
+        _clearLivePreview()
+
         btn.Text = "Building..."
         task.spawn(function()
             if seederPos then
                 -- ── Inf-BFS path (no teleport) ───────────────────────────────
-                local plan          = planInfBFS(posList, seederPos, grid)
+                local plan          = planInfBFS(posList, seederPos + offset, grid)
                 local scaffoldTrack = {}
                 local missed        = buildInfBFS(plan, bmode, btn, previewParts, scaffoldTrack)
                 -- Cube is fully connected; scaffold should be empty, but clean up anyway
@@ -16834,8 +17857,59 @@ do
         end)
     end)
 
+    -- Register the cube Live Preview refresh callback
+    _cubePreviewRefresh = function()
+        if not S.livePreview then return end
+        local char = lp.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+        local bmode = buildMode
+        local grid  = (bmode=="detailed") and 1 or GRID_MULT
+        local seederPos = S.seeder and S.seeder.Parent and S.seeder.Position
+        local origin
+        if seederPos then
+            origin = snapToGrid(seederPos + Vector3.new(0, grid, 0))
+        else
+            origin = snapToGrid(char.HumanoidRootPart.Position)
+        end
+        -- Apply current drag offset
+        origin = origin + S._previewOffset
+        local sz = math.max(1, math.floor(tonumber(cubeSizeBox.Text) or cubeSize))
+        local posList = {}
+        for y=0,sz-1 do for x=0,sz-1 do for z=0,sz-1 do
+            posList[#posList+1] = origin + Vector3.new(x*grid, y*grid, z*grid)
+        end end end
+        local parts
+        local detailedIndividualMax = 5
+        if sz <= (bmode=="detailed" and detailedIndividualMax or PREVIEW_INDIVIDUAL_MAX) then
+            parts = makePreviewIndividual(posList, grid)
+        else
+            parts = makePreviewBox(origin, sz, sz, sz, grid)
+        end
+        local cx = origin.X + (sz-1)*grid/2
+        local cy = origin.Y + (sz-1)*grid/2
+        local cz = origin.Z + (sz-1)*grid/2
+        _spawnLivePreview(parts, Vector3.new(cx, cy, cz))
+    end
+
     local textToBuild = ""
-    local _,textBox = makeInput(g,"Text to Build","Enter text...",function(v) textToBuild=v end)
+    local _,textBox = makeInput(g,"Text to Build","Enter text...",function(v)
+        textToBuild=v
+        if S.livePreview and _textPreviewRefresh then _textPreviewRefresh() end
+    end)
+
+    -- ── Live Preview / Move Preview toggles for Build Text ────────────────
+    makeToggle(g, "Live Preview", function(on)
+        S.livePreview = on
+        S._previewGenTag = "text"
+        if on then
+            if _textPreviewRefresh then _textPreviewRefresh() end
+        else
+            _clearLivePreview()
+        end
+    end, false)
+    makeToggle(g, "Move Preview", function(on)
+        _setMovePreview(on)
+    end, false)
 
     makeButton(g,"Build Text",function(btn)
         textToBuild = (textBox.Text ~= "" and textBox.Text or textToBuild)
@@ -16855,12 +17929,13 @@ do
         -- Seeder set: position text so its left-bottom corner is one step above seeder.
         -- No seeder: text originates at player position (legacy).
         local seederPos = S.seeder and S.seeder.Parent and S.seeder.Position
+        local offset = _getPreviewOffset()
         local pivotCF
         if seederPos then
-            local textOrigin = snapToGrid(seederPos + Vector3.new(0, grid, 0))
+            local textOrigin = snapToGrid(seederPos + Vector3.new(0, grid, 0)) + offset
             pivotCF = CFrame.new(textOrigin)
         else
-            pivotCF = lp.Character:GetPivot()
+            pivotCF = lp.Character:GetPivot() + offset
         end
 
         local _,ptt,cfr = TextLib.displayblocks(
@@ -16872,6 +17947,9 @@ do
         for _,v in pairs(cfr) do
             positions[#positions+1] = snapToGrid(v.Position)
         end
+
+        -- Tear down live preview now that the real build is firing
+        _clearLivePreview()
 
         if #positions == 0 then
             if ptt then for _,p in pairs(ptt) do pcall(function() p:Destroy() end) end end
@@ -16886,7 +17964,7 @@ do
                 -- Text may have multiple disconnected components (letters with air between).
                 -- planInfBFS automatically inserts scaffold bricks to bridge them.
                 btn.Text = "Planning BFS..."
-                local plan          = planInfBFS(positions, seederPos, grid)
+                local plan          = planInfBFS(positions, seederPos + offset, grid)
                 local scaffoldCount = 0
                 for _ in pairs(plan.scaffoldKeys) do scaffoldCount = scaffoldCount + 1 end
                 if scaffoldCount > 0 then
@@ -16913,6 +17991,49 @@ do
             end
         end)
     end)
+
+    -- Register the text Live Preview refresh callback
+    _textPreviewRefresh = function()
+        if not S.livePreview then return end
+        local txt = (textBox.Text ~= "" and textBox.Text or textToBuild)
+        if txt == "" then return end
+        local char = lp.Character
+        if not char then return end
+        local bmode = buildMode
+        local grid  = (bmode=="detailed") and 1 or GRID_MULT
+        local seederPos = S.seeder and S.seeder.Parent and S.seeder.Position
+        local pivotCF
+        if seederPos then
+            local textOrigin = snapToGrid(seederPos + Vector3.new(0, grid, 0)) + S._previewOffset
+            pivotCF = CFrame.new(textOrigin)
+        else
+            pivotCF = char:GetPivot() + S._previewOffset
+        end
+        local blocks = TextLib.getblocks(txt)
+        local _,ptt,cfr = TextLib.displayblocks(
+            blocks, pivotCF, 4, true, 4, 4, 0, false, Enum.Material.ForceField
+        )
+        local positions = {}
+        for _,v in pairs(cfr) do
+            positions[#positions+1] = snapToGrid(v.Position)
+        end
+        if #positions == 0 then
+            if ptt then for _,p in pairs(ptt) do pcall(function() p:Destroy() end) end end
+            return
+        end
+        -- Use displayblocks ghost parts as the live preview geometry
+        local previewParts = {}
+        if ptt then
+            for _, p in pairs(ptt) do
+                table.insert(previewParts, p)
+            end
+        end
+        -- Compute centroid for anchor
+        local sum = Vector3.new(0,0,0)
+        for _, pos in ipairs(positions) do sum = sum + pos end
+        local centre = sum / math.max(1, #positions)
+        _spawnLivePreview(previewParts, centre)
+    end
 
 -- ╔══════════════════════════════════════════════════════════════╗
 -- ║  SIGMA CHAT COMMANDS SYSTEM  v1.0                           ║
