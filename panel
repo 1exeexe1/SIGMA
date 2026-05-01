@@ -19663,6 +19663,10 @@ local _mrSelected    = {}  -- set of selected ring names for Toggle Selected
 local _mrListButtons = {}  -- label → toggle fn refs
 local _mrListFrame   = nil -- scrolling frame for the ring list
 
+-- Forward-declare editor input boxes so _mrRefreshList can reference them
+-- as upvalues before the UI widgets are actually created further below.
+local speedBox, radiusBox, lengthBox, countBox
+
 local function _mrRefreshList()
     if not _mrListFrame then return end
     for _, ch in ipairs(_mrListFrame:GetChildren()) do
@@ -19831,10 +19835,10 @@ makeButton(gR, "⟳ Refresh List", function() _mrRefreshList() end)
 makeSection(gR, "── Ring Editor & Save ──────────────────────────")
 makeSection(gR, "Edit params below, then Save as a named ring or toggle the single editor ring.")
 
-local _, speedBox  = makeInput(gR, "Ring Speed (studs/sec)", "2",  function(v) _ringSpeed  = tonumber(v:match("[%d%.]+")) or _ringSpeed  end)
-local _, radiusBox = makeInput(gR, "Ring Radius (studs)",    "8",  function(v) _ringRadius = tonumber(v:match("[%d%.]+")) or _ringRadius end)
-local _, lengthBox = makeInput(gR, "Ring Length (studs)",    "10", function(v) _ringLength = tonumber(v:match("[%d%.]+")) or _ringLength end)
-local _, countBox  = makeInput(gR, "Amount of Bricks",       "6",  function(v) _ringCount  = math.clamp(tonumber(v:match("%d+")) or _ringCount, 1, 64) end)
+local _lbl1; _lbl1, speedBox  = makeInput(gR, "Ring Speed (studs/sec)", "2",  function(v) _ringSpeed  = tonumber(v:match("[%d%.]+")) or _ringSpeed  end)
+local _lbl2; _lbl2, radiusBox = makeInput(gR, "Ring Radius (studs)",    "8",  function(v) _ringRadius = tonumber(v:match("[%d%.]+")) or _ringRadius end)
+local _lbl3; _lbl3, lengthBox = makeInput(gR, "Ring Length (studs)",    "10", function(v) _ringLength = tonumber(v:match("[%d%.]+")) or _ringLength end)
+local _lbl4; _lbl4, countBox  = makeInput(gR, "Amount of Bricks",       "6",  function(v) _ringCount  = math.clamp(tonumber(v:match("%d+")) or _ringCount, 1, 64) end)
 speedBox.Text = "2"; radiusBox.Text = "8"; lengthBox.Text = "10"; countBox.Text = "6"
 
 makeSection(gR, "── Ring Angle (degrees, per axis) ──────────────")
