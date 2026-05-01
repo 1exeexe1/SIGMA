@@ -3567,56 +3567,50 @@ do
                 -- ── Per-player threat detection ────────────────────────────
                 local myPos=hrp.Position
                 for _,p in pairs(Players:GetPlayers()) do
-                    if p==lp then goto nextPlayer end
-                    local pchar=p.Character; if not pchar then goto nextPlayer end
-                    local phrp=pchar:FindFirstChild("HumanoidRootPart"); if not phrp then goto nextPlayer end
+                    if p~=lp then
+                        local pchar=p.Character
+                        local phrp=pchar and pchar:FindFirstChild("HumanoidRootPart")
+                        if pchar and phrp then
+                            local dist=(phrp.Position-myPos).Magnitude
+                            if dist>FLING_RANGE then
+                                -- Out of range: restore collision if they were flagged
+                                local st=_afState[p]
+                                if st and st.isThreat then
+                                    for _,part in pairs(pchar:GetDescendants()) do
+                                        if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                                    end
+                                    st.isThreat=false
+                                end
+                            else
+                                -- In range: track and classify
+                                if not _afState[p] then
+                                    _afState[p]={lastVel=phrp.AssemblyLinearVelocity,spikeTick=0,threatTick=0,isThreat=false}
+                                end
+                                local st=_afState[p]
+                                local curVel=phrp.AssemblyLinearVelocity
+                                local delta=(curVel-st.lastVel).Magnitude
+                                local angMag=phrp.AssemblyAngularVelocity.Magnitude
+                                local isSpiking=(delta>FLING_SPIKE_MAG) or (angMag>FLING_SPIN_MAG and curVel.Magnitude>40)
+                                st.lastVel=curVel
 
-                    -- Only watch nearby players (range gate — no per-frame cost for distant ones)
-                    local dist=(phrp.Position-myPos).Magnitude
-                    if dist>FLING_RANGE then
-                        -- If they were a threat and walked away, clear immediately
-                        local st=_afState[p]
-                        if st and st.isThreat then
-                            for _,part in pairs(pchar:GetDescendants()) do
-                                if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                                if isSpiking then
+                                    st.spikeTick=now
+                                    if not st.isThreat then
+                                        st.isThreat=true; st.threatTick=now
+                                        for _,part in pairs(pchar:GetDescendants()) do
+                                            if part:IsA("BasePart") then pcall(function() part.CanCollide=false end) end
+                                        end
+                                        if S.antiNotify then notify("Anti-Fling","Threat: "..p.Name,3) end
+                                    end
+                                elseif st.isThreat and (now-st.spikeTick)>FLING_CALM_TIME then
+                                    st.isThreat=false
+                                    for _,part in pairs(pchar:GetDescendants()) do
+                                        if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                                    end
+                                end
                             end
-                            st.isThreat=false
-                        end
-                        goto nextPlayer
-                    end
-
-                    -- Initialise state entry for new player
-                    if not _afState[p] then
-                        _afState[p]={lastVel=phrp.AssemblyLinearVelocity,spikeTick=0,threatTick=0,isThreat=false}
-                    end
-                    local st=_afState[p]
-                    local curVel=phrp.AssemblyLinearVelocity
-                    local delta=(curVel-st.lastVel).Magnitude
-
-                    -- Angular velocity spike = fly+spin pattern
-                    local angMag=phrp.AssemblyAngularVelocity.Magnitude
-
-                    local isSpiking = (delta>FLING_SPIKE_MAG) or (angMag>FLING_SPIN_MAG and curVel.Magnitude>40)
-                    st.lastVel=curVel
-
-                    if isSpiking then
-                        st.spikeTick=now
-                        if not st.isThreat then
-                            st.isThreat=true; st.threatTick=now
-                            -- Noclip ONLY this threat player's character parts
-                            for _,part in pairs(pchar:GetDescendants()) do
-                                if part:IsA("BasePart") then pcall(function() part.CanCollide=false end) end
-                            end
-                            if S.antiNotify then notify("Anti-Fling","Threat: "..p.Name,3) end
-                        end
-                    elseif st.isThreat and (now-st.spikeTick)>FLING_CALM_TIME then
-                        -- Player calmed down — restore collision
-                        st.isThreat=false
-                        for _,part in pairs(pchar:GetDescendants()) do
-                            if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
                         end
                     end
-                    ::nextPlayer::
                 end
 
                 -- GC: remove state for players who left
