@@ -19038,11 +19038,12 @@ end -- ╚═ GUI TOGGLE / DRAG SCOPE ══╝
 -- each Heartbeat. Ownership re-asserted whenever a brick drifts.
 do -- ╔═ RINGS SCOPE ══╗
 
-local _ringActive   = false
-local _ringConn     = nil   -- Heartbeat connection
-local _ringParts    = {}    -- array of BasePart (the bricks)
-local _ringAngle    = 0     -- accumulated angle (radians, driven by Heartbeat)
-local _ringLastTick = tick()
+local _ringActive            = false
+local _ringConn              = nil   -- Heartbeat connection
+local _ringParts             = {}    -- array of BasePart (the grabbed bricks)
+local _ringPartsWereAnchored = {}    -- [part] = original Anchored value (restored on stop)
+local _ringAngle             = 0     -- accumulated angle (radians, driven by Heartbeat)
+local _ringLastTick          = tick()
 
 -- ── Pattern math library ──────────────────────────────────────
 -- Each pattern fn receives (i, n, t, radius, length) and returns
@@ -19171,44 +19172,51 @@ end
 
 -- ── Spawn the ring bricks ─────────────────────────────────────
 local function _ringSpawnParts(count)
-    -- Clean up any existing ring parts
+    -- Release any previously held bricks (restore anchored state, don't destroy them)
     for _, p in ipairs(_ringParts) do
-        pcall(function() p:Destroy() end)
+        pcall(function()
+            if p and p.Parent then
+                p.Anchored = _ringPartsWereAnchored[p] or false
+            end
+        end)
     end
     _ringParts = {}
+    _ringPartsWereAnchored = {}
 
-    _ringBumpOwnership()
-    task.wait(0.05)
-
-    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-    local origin = hrp and hrp.Position or Vector3.new(0, 5, 0)
-
-    local RS_Brick = game:GetService("ReplicatedStorage"):FindFirstChild("Brick")
-
-    for i = 1, count do
-        local p = Instance.new("Part")
-        p.Name         = "SigmaRing_" .. i
-        p.Anchored     = false
-        p.CanCollide   = false
-        p.CanQuery     = false
-        p.CanTouch     = false
-        -- Copy appearance from RS.Brick if available
-        if RS_Brick then
-            p.BrickColor = RS_Brick.BrickColor
-            p.Material   = RS_Brick.Material
-            p.Size       = RS_Brick.Size
-        else
-            p.BrickColor = BrickColor.new("Bright blue")
-            p.Material   = Enum.Material.SmoothPlastic
-            p.Size       = Vector3.new(1, 1, 1)
+    -- ── Collect unanchored bricks from the player's own brick folder ──────
+    -- We only take bricks that are already unanchored — the ring drives them
+    -- via CFrame each Heartbeat tick (same ownership trick as De-Grid).
+    local grabbed = {}
+    pcall(function()
+        local myFolder = getMyBrickFolder()
+        if myFolder then
+            for _, b in ipairs(myFolder:GetChildren()) do
+                if b:IsA("BasePart") and not b.Anchored then
+                    grabbed[#grabbed+1] = b
+                    if #grabbed >= count then break end
+                end
+            end
         end
-        p.CFrame = CFrame.new(origin + Vector3.new(i * 2, 0, 0))
-        p.Parent = workspace
-        _ringParts[i] = p
+    end)
+
+    if #grabbed == 0 then
+        notify("Rings", "No unanchored bricks found in your brick folder — unanchor some first!")
+        _ringActive = false
+        return
     end
 
-    -- Give server time to replicate ownership to us
-    task.wait(0.08)
+    if #grabbed < count then
+        notify("Rings", "Only " .. #grabbed .. " unanchored brick(s) found (wanted " .. count .. ") — using what's available.")
+    end
+
+    -- Claim network ownership before writing CFrames
+    _ringBumpOwnership()
+    task.wait(0.06)
+
+    for _, b in ipairs(grabbed) do
+        _ringPartsWereAnchored[b] = b.Anchored   -- always false here, but kept for safety
+        _ringParts[#_ringParts+1] = b
+    end
 end
 
 -- ── Heartbeat driver ─────────────────────────────────────────
@@ -19406,12 +19414,20 @@ end
 local function _ringStop()
     _ringActive = false
     if _ringConn then _ringConn:Disconnect(); _ringConn = nil end
+    -- Restore bricks to their original anchored state — do NOT destroy them
+    for _, p in ipairs(_ringParts) do
+        pcall(function()
+            if p and p.Parent then
+                p.Anchored = _ringPartsWereAnchored[p] or false
+            end
+        end)
+    end
     _ringRestoreOwnership()
-    for _, p in ipairs(_ringParts) do pcall(function() p:Destroy() end) end
     _ringParts = {}
+    _ringPartsWereAnchored = {}
     _ringAngle = 0
     ringStatusLbl.Text = "Status: inactive"
-    notify("Rings", "Ring stopped.")
+    notify("Rings", "Ring stopped — bricks released.")
 end
 
 local _,_,setRingToggle = makeToggle(gR, "Toggle Ring", function(on)
