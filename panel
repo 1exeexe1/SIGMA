@@ -19682,9 +19682,8 @@ local function _mrRefreshList()
     if #names == 0 then
         local lbl = Instance.new("TextLabel", _mrListFrame)
         lbl.Size = UDim2.new(1,0,0,20); lbl.BackgroundTransparency=1
-        lbl.Text = "(no saved rings)"; lbl.TextColor3 = T.MUTED
+        lbl.Text = "(no saved rings)"; lbl.TextColor3 = Color3.fromRGB(120,120,120)
         lbl.FontFace = FONT_MAIN; lbl.TextSize = 11; lbl.ZIndex = 9
-        onTheme(function(th) lbl.TextColor3 = th.MUTED end)
         return
     end
 
@@ -19798,18 +19797,15 @@ end
 
 -- Build the list frame
 _mrListFrame = Instance.new("Frame")
-_mrListFrame.Size = UDim2.new(1,-8,0,120)
+_mrListFrame.Size = UDim2.new(1,0,0,0)
+_mrListFrame.AutomaticSize = Enum.AutomaticSize.Y
 _mrListFrame.BackgroundTransparency = 1
 _mrListFrame.ZIndex = 8
 _mrListFrame.Parent = gR
-_mrListFrame.ClipsDescendants = true
 
 local mrLL = Instance.new("UIListLayout", _mrListFrame)
 mrLL.SortOrder = Enum.SortOrder.LayoutOrder
 mrLL.Padding = UDim.new(0,2)
-_mrListFrame:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    _mrListFrame.Size = UDim2.new(1,-8,0,math.clamp(mrLL.AbsoluteContentSize.Y,20,200))
-end)
 
 _mrRefreshList()
 
