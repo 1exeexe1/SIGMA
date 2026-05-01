@@ -744,7 +744,19 @@ end
 local _themeListeners = {}
 
 local THEMES = {
-    ["Sigma Blue"] = {
+    ["Sigma Noir"] = {
+        BG      = Color3.fromRGB(10,  10,  10),
+        SIDEBAR = Color3.fromRGB(5,   5,   5),
+        CONTENT = Color3.fromRGB(5,   5,   5),
+        GROUP   = Color3.fromRGB(14,  14,  14),
+        BORDER  = Color3.fromRGB(45,  45,  45),
+        ACCENT  = Color3.fromRGB(180, 180, 180),
+        WHITE   = Color3.fromRGB(255, 255, 255),
+        BTN     = Color3.fromRGB(18,  18,  18),
+        TXT     = Color3.fromRGB(210, 210, 210),
+        INPUT   = Color3.fromRGB(22,  22,  22),
+    },
+    ["Legacy Blue"] = {
         BG      = Color3.fromRGB(23,  23,  23),
         SIDEBAR = Color3.fromRGB(0,   0,   0),
         CONTENT = Color3.fromRGB(0,   0,   0),
@@ -903,7 +915,7 @@ local THEMES = {
 
 }
 
-local currentThemeName = "Sigma Blue"
+local currentThemeName = "Sigma Noir"
 local T = THEMES[currentThemeName]
 
 local function applyTheme(name)
@@ -3504,35 +3516,126 @@ do
     -- Drag
     makeToggle(g,"Anti-Drag",function(on) S.antiDrag=on end)
     -- Fling
+    -- Smart Anti-Fling v2: per-player threat tracking instead of blanket CanCollide=false.
+    -- Detects three threat patterns and responds differently to each:
+    --   N1 — Exploiter flings: walkfling (close-range velocity spike), jumpkick (vertical spike),
+    --         fly+spin (rapid angular + linear combo from airborne player).
+    --   N2 — Enlighten "Fling" command: sudden massive horizontal velocity applied to OUR hrp
+    --         from a server-side push; countered by nullifying external force on our hrp each frame.
+    -- Strategy:
+    --   • Track each OTHER player's HRP velocity history (3-frame rolling window).
+    --   • If a player's velocity is erratic (spike > FLING_SPIKE_MAG in one frame) AND they are
+    --     within FLING_RANGE studs, classify them as a threat and noclip ONLY that player's char
+    --     (CanCollide=false on their parts) — not everyone indiscriminately.
+    --   • Our own HRP is protected: any horizontal velocity above FLING_OWN_MAX is zeroed each
+    --     Stepped frame, and seat-state is cleared (covers Enlighten Fling command).
+    --   • CanCollide is restored on threat players once their velocity calms down for 2+ seconds
+    --     (FLING_CALM_TIME). This prevents permanent noclip on innocent players.
     makeToggle(g,"Anti-Fling",function(on)
         S.antiFling=on
         if on then
+            -- Per-player state: {lastVel, spikeTick, threatTick, isThreat}
+            local _afState = {}   -- [player] = state table
+            local FLING_RANGE      = 30   -- studs: only watch players this close
+            local FLING_SPIKE_MAG  = 55   -- velocity delta (studs/s) in one frame = suspicious
+            local FLING_OWN_MAX    = 75   -- our own horiz vel cap (covers Enlighten fling)
+            local FLING_CALM_TIME  = 2.0  -- seconds of calm before threat is cleared
+            local FLING_SPIN_MAG   = 8    -- rad/s angular magnitude = fly+spin pattern
+
             S._flingConn2=RunService.Stepped:Connect(function()
-                for _,p in pairs(Players:GetPlayers()) do
-                    if p~=lp and p.Character then
-                        for _,part in pairs(p.Character:GetDescendants()) do
-                            if part:IsA("BasePart") then part.CanCollide=false end
-                        end
-                    end
-                end
+                if not S.antiFling then return end
                 local char=lp.Character; if not char then return end
                 local hrp=char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
                 local hum=char:FindFirstChildOfClass("Humanoid")
+                local now=tick()
+
+                -- ── Protect OUR character ──────────────────────────────────
+                -- Clear seat state (exploiters seat you to immobilise + fling)
                 if hum and hum:GetState()==Enum.HumanoidStateType.Seated then
                     hum:SetStateEnabled(Enum.HumanoidStateType.Seated,false)
                     hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.AssemblyLinearVelocity=Vector3.zero
                 end
+                -- Nullify external horizontal force (covers Enlighten Fling command &
+                -- exploit walkfling that targets our velocity directly)
                 local vel=hrp.AssemblyLinearVelocity
                 local horizMag=Vector2.new(vel.X,vel.Z).Magnitude
-                if horizMag>80 then
-                    hrp.AssemblyLinearVelocity=Vector3.new(0,math.min(vel.Y,50),0)
+                if horizMag>FLING_OWN_MAX then
+                    hrp.AssemblyLinearVelocity=Vector3.new(0,math.min(vel.Y,60),0)
+                end
+
+                -- ── Per-player threat detection ────────────────────────────
+                local myPos=hrp.Position
+                for _,p in pairs(Players:GetPlayers()) do
+                    if p==lp then goto nextPlayer end
+                    local pchar=p.Character; if not pchar then goto nextPlayer end
+                    local phrp=pchar:FindFirstChild("HumanoidRootPart"); if not phrp then goto nextPlayer end
+
+                    -- Only watch nearby players (range gate — no per-frame cost for distant ones)
+                    local dist=(phrp.Position-myPos).Magnitude
+                    if dist>FLING_RANGE then
+                        -- If they were a threat and walked away, clear immediately
+                        local st=_afState[p]
+                        if st and st.isThreat then
+                            for _,part in pairs(pchar:GetDescendants()) do
+                                if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                            end
+                            st.isThreat=false
+                        end
+                        goto nextPlayer
+                    end
+
+                    -- Initialise state entry for new player
+                    if not _afState[p] then
+                        _afState[p]={lastVel=phrp.AssemblyLinearVelocity,spikeTick=0,threatTick=0,isThreat=false}
+                    end
+                    local st=_afState[p]
+                    local curVel=phrp.AssemblyLinearVelocity
+                    local delta=(curVel-st.lastVel).Magnitude
+
+                    -- Angular velocity spike = fly+spin pattern
+                    local angMag=phrp.AssemblyAngularVelocity.Magnitude
+
+                    local isSpiking = (delta>FLING_SPIKE_MAG) or (angMag>FLING_SPIN_MAG and curVel.Magnitude>40)
+                    st.lastVel=curVel
+
+                    if isSpiking then
+                        st.spikeTick=now
+                        if not st.isThreat then
+                            st.isThreat=true; st.threatTick=now
+                            -- Noclip ONLY this threat player's character parts
+                            for _,part in pairs(pchar:GetDescendants()) do
+                                if part:IsA("BasePart") then pcall(function() part.CanCollide=false end) end
+                            end
+                            if S.antiNotify then notify("Anti-Fling","Threat: "..p.Name,3) end
+                        end
+                    elseif st.isThreat and (now-st.spikeTick)>FLING_CALM_TIME then
+                        -- Player calmed down — restore collision
+                        st.isThreat=false
+                        for _,part in pairs(pchar:GetDescendants()) do
+                            if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                        end
+                    end
+                    ::nextPlayer::
+                end
+
+                -- GC: remove state for players who left
+                for p in pairs(_afState) do
+                    if not p.Parent then _afState[p]=nil end
                 end
             end)
         else
             if S._flingConn2 then S._flingConn2:Disconnect(); S._flingConn2=nil end
+            -- Restore Seated state and CanCollide on all players
             local hum=lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum:SetStateEnabled(Enum.HumanoidStateType.Seated,true) end
+            for _,p in pairs(Players:GetPlayers()) do
+                if p~=lp and p.Character then
+                    for _,part in pairs(p.Character:GetDescendants()) do
+                        if part:IsA("BasePart") then pcall(function() part.CanCollide=true end) end
+                    end
+                end
+            end
         end
     end)
     -- Fog
@@ -10582,10 +10685,63 @@ local _jKeys     = getgenv()._jarvisKeys  or {}
 local _jQueue    = getgenv()._jarvisQueue or {}
 local _jExhausted = {}   -- id → true (session-only)
 
+local _JKEYS_FILE = "SigmaPanel_JarvisKeys.json"
+
 local function _jSave()
     getgenv()._jarvisKeys  = _jKeys
     getgenv()._jarvisQueue = _jQueue
+    -- File persistence: write label/url/key/model for each entry
+    pcall(function()
+        if typeof(writefile) ~= "function" then return end
+        local out = {}
+        for _, k in ipairs(_jKeys) do
+            out[#out+1] = {
+                id    = k.id,
+                label = k.label,
+                url   = k.url,
+                key   = k.key,
+                model = k.model or "",
+                active = k.active or false,
+            }
+        end
+        writefile(_JKEYS_FILE, HttpService:JSONEncode({keys=out, queue=_jQueue}))
+    end)
 end
+
+local function _jLoadFile()
+    pcall(function()
+        if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" then return end
+        if not isfile(_JKEYS_FILE) then return end
+        local raw = readfile(_JKEYS_FILE)
+        if not raw or raw == "" then return end
+        local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or type(data) ~= "table" then return end
+        -- Only load from file if getgenv has no keys yet (fresh executor session).
+        -- On re-execute, prefer in-memory state to avoid overwriting session-added keys.
+        if #_jKeys == 0 and type(data.keys) == "table" then
+            for _, k in ipairs(data.keys) do
+                if type(k.label)=="string" and type(k.key)=="string" and type(k.url)=="string" then
+                    _jKeys[#_jKeys+1] = {
+                        id    = tonumber(k.id) or (#_jKeys+1),
+                        label = k.label,
+                        url   = k.url,
+                        key   = k.key,
+                        model = k.model or "google/gemini-2.5-pro-preview",
+                        active = false,
+                    }
+                end
+            end
+        end
+        if #_jQueue == 0 and type(data.queue) == "table" then
+            for _, id in ipairs(data.queue) do
+                _jQueue[#_jQueue+1] = tonumber(id)
+            end
+        end
+    end)
+end
+
+-- Load from file before the seed check (seed won't re-inject if file already has keys)
+_jLoadFile()
 
 -- ── First-run seed ─────────────────────────────────────────────
 -- If no keys exist yet (fresh session / first execute), auto-seed
@@ -15725,6 +15881,203 @@ do
     end)
 end
 
+-- ── LOUD BOOMBOX ─────────────────────────────────────────────
+-- Multi-equips every boombox copy in the backpack and fires PlaySong
+-- on each simultaneously with the same audio ID, effectively stacking
+-- volume proportional to the number of boomboxes equipped.
+-- Ring of Boomboxes: un-parents N boomboxes to workspace around the
+-- player's feet (absolute-ownership grab to lock position) and fires
+-- PlaySong on each. Heartbeat loop re-asserts CFrame to keep them
+-- pinned at their spawn position.
+do
+    local g = makeGroup(boomboxPage, "\240\159\224\138 Loud Boombox",
+        "Stack all boomboxes in your backpack to amplify volume. Each extra boombox = +1 layer of audio.")
+
+    local _,volumeBox = makeInput(g, "Volume (# boomboxes)", "max", function() end)
+    local _,audioBox  = makeInput(g, "Audio ID", "142376088", function() end)
+    volumeBox.Text = "max"
+    audioBox.Text  = "142376088"
+
+    -- Internal state
+    local _lbPlaying   = false
+    local _lbRingParts = {}   -- {tool, part} for ring mode
+    local _lbRingConn  = nil  -- Heartbeat for ring lock
+
+    -- Find all boombox tools in backpack + character
+    local function _lbGetBoomboxes()
+        local found = {}
+        local function scan(container)
+            for _, t in ipairs(container:GetChildren()) do
+                if t:IsA("Tool") and t.Name:lower():find("boombox") then
+                    found[#found+1] = t
+                end
+            end
+        end
+        pcall(function() scan(lp.Backpack) end)
+        pcall(function() if lp.Character then scan(lp.Character) end end)
+        return found
+    end
+
+    -- Get the Remote inside a boombox tool
+    local function _lbGetRemote(tool)
+        return tool:FindFirstChild("Remote") or tool:FindFirstChildWhichIsA("RemoteEvent")
+    end
+
+    local statusLbl = makeLabel(g, "Status: idle")
+    statusLbl.TextColor3 = Color3.fromRGB(140,140,140)
+    onTheme(function(th) statusLbl.TextColor3 = Color3.fromRGB(140,140,140) end)
+
+    makeButton(g, "\240\159\224\138 Start Loud Boombox", function()
+        if _lbPlaying then notify("Boombox","Already playing — Stop first."); return end
+        local rawId   = audioBox.Text:match("%d+")
+        local audioId = tonumber(rawId)
+        if not audioId then notify("Boombox","Enter a valid numeric Audio ID."); return end
+
+        local boxes = _lbGetBoomboxes()
+        if #boxes == 0 then notify("Boombox","No boomboxes found in backpack!"); return end
+
+        -- Determine how many to use
+        local maxN = #boxes
+        local wantN = maxN
+        local vRaw = volumeBox.Text:match("^%s*(.-)%s*$")
+        if vRaw ~= "max" and vRaw ~= "" then
+            wantN = math.clamp(tonumber(vRaw) or maxN, 1, maxN)
+        end
+        local toUse = {}
+        for i = 1, wantN do toUse[#toUse+1] = boxes[i] end
+
+        _lbPlaying = true
+        statusLbl.Text = "Status: equipping " .. #toUse .. " boombox(es)…"
+
+        task.spawn(function()
+            local char = lp.Character
+            local hum  = char and char:FindFirstChildOfClass("Humanoid")
+            if not (char and hum) then
+                notify("Boombox","No character!"); _lbPlaying=false; return
+            end
+            -- Force-equip each boombox directly to character (multi-equip pattern)
+            local equipped = {}
+            for _, tool in ipairs(toUse) do
+                pcall(function()
+                    if tool.Parent == lp.Backpack then
+                        tool.Parent = char
+                    end
+                    -- Small wait to let server replicate
+                    task.wait(0.05)
+                    local remote = _lbGetRemote(tool)
+                    if remote then
+                        remote:FireServer("PlaySong", audioId)
+                        equipped[#equipped+1] = tool
+                    end
+                end)
+            end
+            statusLbl.Text = "Status: playing on " .. #equipped .. " boombox(es) \240\159\224\138"
+            notify("Boombox","Loud Boombox \226\150\182 " .. #equipped .. "x on ID " .. tostring(audioId))
+        end)
+    end)
+
+    makeButton(g, "\226\143\143 Stop Loud Boombox", function()
+        _lbPlaying = false
+        statusLbl.Text = "Status: idle"
+        -- Return all boomboxes to backpack
+        local char = lp.Character
+        if char then
+            for _, tool in ipairs(char:GetChildren()) do
+                if tool:IsA("Tool") and tool.Name:lower():find("boombox") then
+                    pcall(function() tool.Parent = lp.Backpack end)
+                end
+            end
+        end
+        notify("Boombox","Loud Boombox stopped.")
+    end)
+
+    makeSection(g, "Ring of Boomboxes \226\128\148 drops clones around you, locked in place")
+
+    local _,ringCountBox = makeInput(g, "Ring count (1–8)", "4", function() end)
+    local _,ringIdBox    = makeInput(g, "Audio ID", "142376088", function() end)
+    ringCountBox.Text = "4"
+    ringIdBox.Text    = "142376088"
+
+    local ringStatusLbl = makeLabel(g, "Ring: inactive")
+    ringStatusLbl.TextColor3 = Color3.fromRGB(140,140,140)
+
+    makeButton(g, "\240\159\224\138 Start Ring", function()
+        if _lbRingConn then notify("Boombox","Ring already active — Stop first."); return end
+        local rawId   = ringIdBox.Text:match("%d+")
+        local audioId = tonumber(rawId)
+        if not audioId then notify("Boombox","Invalid Audio ID."); return end
+        local count = math.clamp(tonumber(ringCountBox.Text) or 4, 1, 8)
+        local boxes = _lbGetBoomboxes()
+        if #boxes == 0 then notify("Boombox","No boomboxes in backpack!"); return end
+        count = math.min(count, #boxes)
+
+        local char = lp.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then notify("Boombox","No character!"); return end
+
+        -- Spawn N anchor parts evenly spaced in a ring around the player
+        _lbRingParts = {}
+        local radius = 5
+        for i = 1, count do
+            local angle = (i-1) * (2*math.pi / count)
+            local pos   = hrp.Position + Vector3.new(math.cos(angle)*radius, 0, math.sin(angle)*radius)
+            local anchor = Instance.new("Part")
+            anchor.Size         = Vector3.one
+            anchor.Transparency = 1
+            anchor.Anchored     = true
+            anchor.CanCollide   = false
+            anchor.CanQuery     = false
+            anchor.CFrame       = CFrame.new(pos)
+            anchor.Parent       = Workspace
+
+            local tool = boxes[i]
+            -- Un-parent to workspace (drop without removing from inventory logic)
+            pcall(function()
+                if tool.Parent == lp.Backpack then tool.Parent = char end
+                task.wait(0.05)
+            end)
+            -- Weld tool handle to anchor using absolute ownership via CFrame lock
+            local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+            _lbRingParts[i] = {anchor=anchor, tool=tool, handle=handle, cf=anchor.CFrame}
+
+            -- Fire PlaySong
+            local remote = _lbGetRemote(tool)
+            if remote then pcall(function() remote:FireServer("PlaySong", audioId) end) end
+        end
+
+        -- Heartbeat: lock each boombox handle to its anchor CFrame each frame
+        _lbRingConn = RunService.Heartbeat:Connect(function()
+            for _, entry in ipairs(_lbRingParts) do
+                local h = entry.handle
+                if h and h.Parent then
+                    pcall(function() h.CFrame = entry.cf end)
+                end
+            end
+        end)
+
+        ringStatusLbl.Text = "Ring: active \226\151\134 " .. count .. " boomboxes"
+        notify("Boombox","Ring of Boomboxes active \226\128\148 " .. count .. " units")
+    end)
+
+    makeButton(g, "\226\143\143 Stop Ring", function()
+        if _lbRingConn then _lbRingConn:Disconnect(); _lbRingConn=nil end
+        -- Return tools to backpack and clean anchors
+        for _, entry in ipairs(_lbRingParts) do
+            pcall(function()
+                if entry.tool and entry.tool.Parent then
+                    entry.tool.Parent = lp.Backpack
+                end
+                if entry.anchor and entry.anchor.Parent then
+                    entry.anchor:Destroy()
+                end
+            end)
+        end
+        _lbRingParts = {}
+        ringStatusLbl.Text = "Ring: inactive"
+        notify("Boombox","Ring stopped.")
+    end)
+end
+
 -- ── BOOMBOX ID LOGGER panel ───────────────────────────────────
 do
     local _bbLogEntries = {}  -- [{id,name,duration,owner,time}]
@@ -16868,7 +17221,7 @@ end -- ╚═ NANOBOTS TAB SCOPE ══╝
 do
     local g=makeGroup(settingsPage,"Theme")
     local themeNames={}; for k in pairs(THEMES) do table.insert(themeNames,k) end
-    makeDropdown(g,"Theme",themeNames,"Sigma Blue",function(v)
+    makeDropdown(g,"Theme",themeNames,"Sigma Noir",function(v)
         applyTheme(v); notify("Sigma","Theme: "..v)
     end)
     local acRow=Instance.new("Frame"); acRow.Size=UDim2.new(1,0,0,20); acRow.BackgroundTransparency=1; acRow.ZIndex=8; acRow.Parent=g
@@ -16907,6 +17260,180 @@ do
     onTheme(function(th) info.TextColor3=th.WHITE end)
 end
 
+
+-- ── PANEL SETTINGS SAVE / LOAD ───────────────────────────────
+-- Persists passive settings (toggles, numeric values, theme).
+-- Excluded: auras, previews, god mode, free cam, server hop, noclip,
+-- and all runtime _ prefixed state.
+local _SETTINGS_FILE = "SigmaPanel_Settings.json"
+
+local function sigmaSaveSettings()
+    pcall(function()
+        if typeof(writefile) ~= "function" then
+            notify("Sigma","writefile not available in this executor."); return
+        end
+        local d = {
+            -- Movement
+            wsEnabled=S.wsEnabled, wsValue=S.wsValue, wsInfinite=S.wsInfinite,
+            jpEnabled=S.jpEnabled, jpValue=S.jpValue, jpInfinite=S.jpInfinite,
+            flySpeed=S.flySpeed, flyPCMode=S.flyPCMode,
+            infJump=S.infJump, shiftlock=S.shiftlock,
+            gravity=S.gravity, gravityValue=S.gravityValue,
+            boostFPS=S.boostFPS,
+            -- Character
+            animSpeed=S.animSpeed, animSpeedVal=S.animSpeedVal,
+            fakeLag=S.fakeLag, fakeLagVal=S.fakeLagVal,
+            spin=S.spin, spinSpeed=S.spinSpeed,
+            grabTool=S.grabTool,
+            -- Misc / Main
+            spychat=S.spychat, botReply=S.botReply,
+            botTrigger=S.botTrigger, botReplyTxt=S.botReplyTxt,
+            botCase=S.botCase, notifyOn=S.notifyOn, antiNotify=S.antiNotify,
+            autoDrop=S.autoDrop, tpDeathPos=S.tpDeathPos,
+            multiChat=S.multiChat, multiChatCount=S.multiChatCount,
+            cmdPrefix=S.cmdPrefix, chatCmds=S.chatCmds, cmdNotify=S.cmdNotify,
+            uiAnim=S.uiAnim,
+            -- Anti
+            antiFling=S.antiFling, antiAfk=S.antiAfk, antiRagdoll=S.antiRagdoll,
+            antiVoid=S.antiVoid, antiKB=S.antiKB, antiKick=S.antiKick,
+            antiNan=S.antiNan, antiGlitch=S.antiGlitch, antiFreeze=S.antiFreeze,
+            antiJail=S.antiJail, antiFog=S.antiFog, antiBlind=S.antiBlind,
+            antiMyopic=S.antiMyopic, autoFixCam=S.autoFixCam,
+            antiStun=S.antiStun, antiToxic=S.antiToxic, antiDrag=S.antiDrag,
+            antiWS=S.antiWS, antiBlur=S.antiBlur, antiNoColor=S.antiNoColor,
+            -- Visual / ESP
+            espOn=S.espOn, espNames=S.espNames, espDist=S.espDist,
+            espOutline=S.espOutline, espMaxDist=S.espMaxDist,
+            espDisplay=S.espDisplay, espAdmin=S.espAdmin,
+            espEnlighten=S.espEnlighten, espGriefer=S.espGriefer,
+            espInvisible=S.espInvisible,
+            boomboxESP=S.boomboxESP, boomboxAudioHUD=S.boomboxAudioHUD,
+            boomboxOnly=S.boomboxOnly, boomboxAutoMute=S.boomboxAutoMute,
+            -- Target
+            targetHighlight=S.targetHighlight, targetUnanchor=S.targetUnanchor,
+            targetDelcubes=S.targetDelcubes, targetOthers=S.targetOthers,
+            clickTP=S.clickTP, hApply=S.hApply,
+            -- Theme
+            theme=currentThemeName,
+        }
+        writefile(_SETTINGS_FILE, HttpService:JSONEncode(d))
+        notify("Sigma","Settings saved \226\156\147")
+    end)
+end
+
+local _settingsLoaded = false
+local function sigmaLoadSettings()
+    if _settingsLoaded then return end
+    _settingsLoaded = true
+    pcall(function()
+        if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" then return end
+        if not isfile(_SETTINGS_FILE) then return end
+        local raw = readfile(_SETTINGS_FILE)
+        if not raw or raw == "" then return end
+        local ok, d = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or type(d) ~= "table" then return end
+        -- Movement
+        if type(d.wsEnabled)=="boolean"  then S.wsEnabled=d.wsEnabled end
+        if type(d.wsValue)=="number"     then S.wsValue=d.wsValue end
+        if type(d.wsInfinite)=="boolean" then S.wsInfinite=d.wsInfinite end
+        if type(d.jpEnabled)=="boolean"  then S.jpEnabled=d.jpEnabled end
+        if type(d.jpValue)=="number"     then S.jpValue=d.jpValue end
+        if type(d.jpInfinite)=="boolean" then S.jpInfinite=d.jpInfinite end
+        if type(d.flySpeed)=="number"    then S.flySpeed=d.flySpeed end
+        if type(d.flyPCMode)=="boolean"  then S.flyPCMode=d.flyPCMode end
+        if type(d.infJump)=="boolean"    then S.infJump=d.infJump end
+        if type(d.shiftlock)=="boolean"  then S.shiftlock=d.shiftlock end
+        if type(d.gravity)=="boolean"    then S.gravity=d.gravity end
+        if type(d.gravityValue)=="number" then S.gravityValue=d.gravityValue end
+        if type(d.boostFPS)=="boolean"   then S.boostFPS=d.boostFPS end
+        -- Character
+        if type(d.animSpeed)=="boolean"  then S.animSpeed=d.animSpeed end
+        if type(d.animSpeedVal)=="number" then S.animSpeedVal=d.animSpeedVal end
+        if type(d.fakeLag)=="boolean"    then S.fakeLag=d.fakeLag end
+        if type(d.fakeLagVal)=="number"  then S.fakeLagVal=d.fakeLagVal end
+        if type(d.spin)=="boolean"       then S.spin=d.spin end
+        if type(d.spinSpeed)=="number"   then S.spinSpeed=d.spinSpeed end
+        if type(d.grabTool)=="boolean"   then S.grabTool=d.grabTool end
+        -- Misc
+        if type(d.spychat)=="boolean"    then S.spychat=d.spychat end
+        if type(d.botReply)=="boolean"   then S.botReply=d.botReply end
+        if type(d.botTrigger)=="string"  then S.botTrigger=d.botTrigger end
+        if type(d.botReplyTxt)=="string" then S.botReplyTxt=d.botReplyTxt end
+        if type(d.botCase)=="boolean"    then S.botCase=d.botCase end
+        if type(d.notifyOn)=="boolean"   then S.notifyOn=d.notifyOn end
+        if type(d.antiNotify)=="boolean" then S.antiNotify=d.antiNotify end
+        if type(d.autoDrop)=="boolean"   then S.autoDrop=d.autoDrop end
+        if type(d.tpDeathPos)=="boolean" then S.tpDeathPos=d.tpDeathPos end
+        if type(d.multiChat)=="boolean"  then S.multiChat=d.multiChat end
+        if type(d.multiChatCount)=="number" then S.multiChatCount=d.multiChatCount end
+        if type(d.cmdPrefix)=="string" and #d.cmdPrefix==1 then S.cmdPrefix=d.cmdPrefix end
+        if type(d.chatCmds)=="boolean"   then S.chatCmds=d.chatCmds end
+        if type(d.cmdNotify)=="boolean"  then S.cmdNotify=d.cmdNotify end
+        if type(d.uiAnim)=="boolean"     then S.uiAnim=d.uiAnim end
+        -- Anti
+        if type(d.antiFling)=="boolean"  then S.antiFling=d.antiFling end
+        if type(d.antiAfk)=="boolean"    then S.antiAfk=d.antiAfk end
+        if type(d.antiRagdoll)=="boolean" then S.antiRagdoll=d.antiRagdoll end
+        if type(d.antiVoid)=="boolean"   then S.antiVoid=d.antiVoid end
+        if type(d.antiKB)=="boolean"     then S.antiKB=d.antiKB end
+        if type(d.antiKick)=="boolean"   then S.antiKick=d.antiKick end
+        if type(d.antiNan)=="boolean"    then S.antiNan=d.antiNan end
+        if type(d.antiGlitch)=="boolean" then S.antiGlitch=d.antiGlitch end
+        if type(d.antiFreeze)=="boolean" then S.antiFreeze=d.antiFreeze end
+        if type(d.antiJail)=="boolean"   then S.antiJail=d.antiJail end
+        if type(d.antiFog)=="boolean"    then S.antiFog=d.antiFog end
+        if type(d.antiBlind)=="boolean"  then S.antiBlind=d.antiBlind end
+        if type(d.antiMyopic)=="boolean" then S.antiMyopic=d.antiMyopic end
+        if type(d.autoFixCam)=="boolean" then S.autoFixCam=d.autoFixCam end
+        if type(d.antiStun)=="boolean"   then S.antiStun=d.antiStun end
+        if type(d.antiToxic)=="boolean"  then S.antiToxic=d.antiToxic end
+        if type(d.antiDrag)=="boolean"   then S.antiDrag=d.antiDrag end
+        if type(d.antiWS)=="boolean"     then S.antiWS=d.antiWS end
+        if type(d.antiBlur)=="boolean"   then S.antiBlur=d.antiBlur end
+        if type(d.antiNoColor)=="boolean" then S.antiNoColor=d.antiNoColor end
+        -- Visual
+        if type(d.espOn)=="boolean"      then S.espOn=d.espOn end
+        if type(d.espNames)=="boolean"   then S.espNames=d.espNames end
+        if type(d.espDist)=="boolean"    then S.espDist=d.espDist end
+        if type(d.espOutline)=="boolean" then S.espOutline=d.espOutline end
+        if type(d.espMaxDist)=="number"  then S.espMaxDist=d.espMaxDist end
+        if type(d.espDisplay)=="boolean" then S.espDisplay=d.espDisplay end
+        if type(d.espAdmin)=="boolean"   then S.espAdmin=d.espAdmin end
+        if type(d.espEnlighten)=="boolean" then S.espEnlighten=d.espEnlighten end
+        if type(d.espGriefer)=="boolean" then S.espGriefer=d.espGriefer end
+        if type(d.espInvisible)=="boolean" then S.espInvisible=d.espInvisible end
+        if type(d.boomboxESP)=="boolean" then S.boomboxESP=d.boomboxESP end
+        if type(d.boomboxAudioHUD)=="boolean" then S.boomboxAudioHUD=d.boomboxAudioHUD end
+        if type(d.boomboxOnly)=="boolean" then S.boomboxOnly=d.boomboxOnly end
+        if type(d.boomboxAutoMute)=="boolean" then S.boomboxAutoMute=d.boomboxAutoMute end
+        -- Target
+        if type(d.targetHighlight)=="boolean" then S.targetHighlight=d.targetHighlight end
+        if type(d.targetUnanchor)=="boolean" then S.targetUnanchor=d.targetUnanchor end
+        if type(d.targetDelcubes)=="boolean" then S.targetDelcubes=d.targetDelcubes end
+        if type(d.targetOthers)=="boolean" then S.targetOthers=d.targetOthers end
+        if type(d.clickTP)=="boolean"    then S.clickTP=d.clickTP end
+        if type(d.hApply)=="boolean"     then S.hApply=d.hApply end
+        -- Theme (applied immediately so colour is correct before UI renders)
+        if type(d.theme)=="string" and THEMES[d.theme] then
+            applyTheme(d.theme)
+        end
+    end)
+end
+
+do
+    local g = makeGroup(settingsPage, "Save / Load Settings",
+        "Persist panel toggles, values, and theme across sessions. Uses writefile/readfile.")
+    makeSection(g, "Saves: Movement \194\183 Anti \194\183 Visual \194\183 Target \194\183 Misc \194\183 Theme")
+    makeButton(g, "\240\159\146\190 Save Settings to File", function()
+        sigmaSaveSettings()
+    end)
+    makeButton(g, "\240\159\223\128 Load Settings from File", function()
+        _settingsLoaded = false  -- allow reload
+        sigmaLoadSettings()
+        notify("Sigma","Settings loaded \226\128\148 re-execute toggles manually to activate.")
+    end)
+    makeSection(g, "Files: SigmaPanel_Settings.json \194\183 SigmaPanel_JarvisKeys.json")
+end
 
 -- ── SINGLE HEARTBEAT DISPATCHER ──────────────────────────────
 local _rayExclude=RaycastParams.new(); _rayExclude.FilterType=Enum.RaycastFilterType.Exclude
@@ -17883,24 +18410,88 @@ gearBubble.MouseButton1Click:Connect(function()
     debugMenu.Visible=debugOpen
 end)
 
--- ── HELPERS: show/hide MainFrame with fade ───────────────────
-local _panelTI=TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+-- ── HELPERS: show/hide MainFrame with fancy scale-from-bubble ────────────
+-- Animation breakdown (uiAnim=true):
+--   Open : panel scales up from the bubble's screen position → full size
+--          with a spring-style Bounce easing. Accent UIStroke pulses once.
+--   Close: panel shrinks back toward bubble with Quad InOut, then hides.
+--   Minimize/Restore: height-only tween with Quad Out (unchanged feel).
+-- uiAnim=false: instant show/hide as before — zero extra cost.
+local _panelTI      = TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+local _panelOpenTI  = TweenInfo.new(0.22,Enum.EasingStyle.Back,Enum.EasingDirection.Out)
+local _panelCloseTI = TweenInfo.new(0.16,Enum.EasingStyle.Quad,Enum.EasingDirection.InOut)
+local _panelMinTI   = TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+
+-- UIStroke on MainFrame — used for the open-pulse effect only.
+local _mainStroke = Instance.new("UIStroke")
+_mainStroke.Color     = T.ACCENT
+_mainStroke.Thickness = 0
+_mainStroke.Parent    = MainFrame
+onTheme(function(th) _mainStroke.Color = th.ACCENT end)
+
+local function _pulseStroke()
+    -- Quick accent-stroke flash: 0 → 2 → 0 over 0.35 s
+    _mainStroke.Thickness = 0
+    TweenService:Create(_mainStroke, TweenInfo.new(0.12,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
+        {Thickness=2}):Play()
+    task.delay(0.13, function()
+        TweenService:Create(_mainStroke, TweenInfo.new(0.22,Enum.EasingStyle.Quad,Enum.EasingDirection.In),
+            {Thickness=0}):Play()
+    end)
+end
+
 local function showPanel()
     guiVisible=true; panelMinimized=false
-    MainFrame.Visible=true; MainFrame.Size=UDim2.new(0,500,0,PANEL_FULL_H)
-    if S.uiAnim then
-        MainFrame.BackgroundTransparency=1
-        TweenService:Create(MainFrame,_panelTI,{BackgroundTransparency=0}):Play()
-    end
+    ContentArea.Visible=true; SideBar.Visible=true
     local tb=tabPages[S.activeTab or "Main"]
     if tb then tb.Visible=true end
+
+    if S.uiAnim then
+        -- Compute bubble screen position relative to ScreenGui so we can
+        -- start the panel "at" the bubble and expand outward.
+        local bubAbs  = bubble.AbsolutePosition
+        local bubSz   = bubble.AbsoluteSize
+        local bubCX   = bubAbs.X + bubSz.X/2
+        local bubCY   = bubAbs.Y + bubSz.Y/2
+        -- Tiny starting size centred on the bubble
+        local startW, startH = 60, 26
+        MainFrame.Size     = UDim2.new(0, startW, 0, startH)
+        MainFrame.Position = UDim2.new(0, bubCX - startW/2, 0, bubCY - startH/2)
+        MainFrame.BackgroundTransparency = 0.6
+        MainFrame.Visible  = true
+        -- Animate to full size + original position simultaneously
+        TweenService:Create(MainFrame, _panelOpenTI, {
+            Size                 = UDim2.new(0,500,0,PANEL_FULL_H),
+            Position             = UDim2.new(0.5,-250,0.5,-170),
+            BackgroundTransparency = 0,
+        }):Play()
+        _pulseStroke()
+    else
+        MainFrame.Size     = UDim2.new(0,500,0,PANEL_FULL_H)
+        MainFrame.Position = UDim2.new(0.5,-250,0.5,-170)
+        MainFrame.BackgroundTransparency = 0
+        MainFrame.Visible  = true
+    end
 end
 
 local function hidePanel()
     guiVisible=false; panelMinimized=false
     if S.uiAnim then
-        TweenService:Create(MainFrame,_panelTI,{BackgroundTransparency=1}):Play()
-        task.delay(0.19,function() MainFrame.Visible=false end)
+        -- Shrink toward bubble
+        local bubAbs = bubble.AbsolutePosition
+        local bubSz  = bubble.AbsoluteSize
+        local bubCX  = bubAbs.X + bubSz.X/2
+        local bubCY  = bubAbs.Y + bubSz.Y/2
+        TweenService:Create(MainFrame, _panelCloseTI, {
+            Size                 = UDim2.new(0, 40, 0, 16),
+            Position             = UDim2.new(0, bubCX-20, 0, bubCY-8),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(0.17, function()
+            MainFrame.Visible  = false
+            -- Reset so next open starts clean
+            MainFrame.BackgroundTransparency = 0
+        end)
     else
         MainFrame.Visible=false
     end
@@ -17912,22 +18503,24 @@ local function minimizePanel()
     MainFrame.Visible=true
     MinBtn.Text="+"
     if S.uiAnim then
-        TweenService:Create(MainFrame,TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
+        -- Collapse height first, then hide content (avoids content-layout jump)
+        TweenService:Create(MainFrame, _panelMinTI,
             {Size=UDim2.new(0,500,0,26)}):Play()
+        task.delay(0.12, function()
+            ContentArea.Visible=false; SideBar.Visible=false
+        end)
     else
         MainFrame.Size=UDim2.new(0,500,0,26)
+        ContentArea.Visible=false; SideBar.Visible=false
     end
-    ContentArea.Visible=false
-    SideBar.Visible=false
 end
 
 local function restorePanel()
     panelMinimized=false; guiVisible=true
     MinBtn.Text="-"
-    ContentArea.Visible=true
-    SideBar.Visible=true
+    ContentArea.Visible=true; SideBar.Visible=true
     if S.uiAnim then
-        TweenService:Create(MainFrame,TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
+        TweenService:Create(MainFrame, _panelMinTI,
             {Size=UDim2.new(0,500,0,PANEL_FULL_H)}):Play()
     else
         MainFrame.Size=UDim2.new(0,500,0,PANEL_FULL_H)
@@ -19886,4 +20479,7 @@ do
 end
 
 end
+-- ── AUTO-LOAD SETTINGS ON EXECUTE ───────────────────────────
+task.defer(sigmaLoadSettings)
+
 end)() -- ╚═ BUILD SYSTEM INTERNALS ══╝
