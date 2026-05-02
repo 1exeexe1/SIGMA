@@ -19191,7 +19191,6 @@ end -- ╚═ GUI TOGGLE / DRAG SCOPE ══╝
 -- Ownership strategy mirrors De-Grid: bump SimulationRadius to
 -- 9e9 so the server grants network ownership, then write CFrame
 -- each Heartbeat. Ownership re-asserted whenever a brick drifts.
-do -- ╔═ RINGS SCOPE ══╗
 -- ─────────────────────────────────────────────────────────────
 -- Multi-ring preset storage (survives respawn via getgenv).
 -- Schema: _sigmaRings[name] = {
@@ -19422,6 +19421,7 @@ local FACE_CORRECTIONS = {
 
 -- ── Core tick: move one ring's bricks one frame ───────────────
 local HEAL_INTERVAL = 0.5
+do -- ╔═ RINGS SCOPE ══╗
 
 local function _ringTickInstance(dt, params, state)
     local radius = math.max(params.radius, 0.5)
