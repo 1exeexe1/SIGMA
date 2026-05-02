@@ -19413,11 +19413,11 @@ local function _ringSpawnParts(count, sourceName, partsArr, wereAnchoredTbl)
     local grabbed = _ringGetSourceBricks(sourceName, excludeSet)
 
     if #grabbed == 0 then
-        notify("Rings", "No free bricks in \\"..sourceName.."\\" — all claimed or none unanchored!")
+        notify("Rings", "No free bricks in \"" .. sourceName .. "\" -- all claimed or none unanchored!")
         return false
     end
     if #grabbed < count then
-        notify("Rings", "Only "..#grabbed.." free brick(s) (wanted "..count..") — using all available.")
+        notify("Rings", "Only " .. #grabbed .. " free brick(s) (wanted " .. count .. ") -- using all available.")
     end
 
     _ringBumpOwnership()
