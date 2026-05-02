@@ -1,9 +1,41 @@
 -- ============================================================
---  SIGMA PANEL  v4.7.7  |  TCO MERGE + QUALITY EDITION
+--  SIGMA PANEL  v4.7.8  |  PART CTRL OVERHAUL EDITION
 -- ============================================================
 --
 -- ── FULL CHANGELOG ───────────────────────────────────────────
---  v4.7.7 [THIS BUILD]
+--  v4.7.8 [THIS BUILD]
+--    Revamp: Part Controller — all four sub-tabs improved.
+--
+--    Rings: 8 new mathematical 3D patterns added:
+--      Sphere   (Fibonacci surface distribution)
+--      Torus    (ring-of-rings / donut)
+--      Rose     (rhodonea with Y oscillation)
+--      Trefoil  (classic 3D knot)
+--      Galaxy   (2-arm logarithmic spiral)
+--      Vortex   (tightening helix toward centre)
+--      Figure8-3D (tilted figure-8)
+--      Hyperboloid (ruled double-cone surface)
+--
+--    Cosmetics: all formations anatomically corrected + 3 new:
+--      Wings   → curved 3D feather arc with dihedral, swept back
+--      Sword   → anchored at right hand, extends forward
+--      Staff   → anchored at left hand, rises upward with tilt
+--      Halo    → tight radius (1.3) above head, bricks tilted radially
+--      Shield  → slightly curved wall, centred on torso
+--      Crown   → new: tiara band + varying-height spikes
+--      Cloak   → new: draping cape behind player, billows outward
+--      Armour  → new: shoulder pads, chest plate, arm guards distributed on body
+--
+--    Attacks: Throw now uses a Fibonacci hemisphere cone spread
+--      (3D spherical shotgun burst from camera direction) instead
+--      of a flat horizontal line. Spread angle ≈ 35°.
+--
+--    Clone Ctrl: clone ring and clone throw now re-assert
+--      SimulationRadius every ~0.4s during Heartbeat, making
+--      clone repositioning server-replicated (visible to others),
+--      matching the same ownership strategy as the brick rings.
+--
+--  v4.7.7 [PREVIOUS BUILD]
 --    New:   Jarvis: web search capability. Jarvis can now emit
 --           {"sigma_action":"web_search","query":"..."} to fetch
 --           live internet results (game IDs, item prices, etc.)
@@ -19352,6 +19384,7 @@ end
 
 -- ── Pattern library ───────────────────────────────────────────
 local RING_PATTERNS = {
+    -- ── Original patterns ──────────────────────────────────────
     Circle = function(i, n, angle, radius, _length)
         local a = angle + (i-1) * (2*math.pi / n)
         return Vector3.new(math.cos(a)*radius, 0, math.sin(a)*radius)
@@ -19398,8 +19431,88 @@ local RING_PATTERNS = {
         local r = radius * (1 - math.cos(t))
         return Vector3.new(math.cos(t)*r, 0, math.sin(t)*r)
     end,
+    -- ── New 3D / mathematical patterns ────────────────────────
+    -- Sphere: evenly distributes bricks over a sphere surface (Fibonacci lattice)
+    Sphere = function(i, n, angle, radius, _length)
+        local golden = math.pi * (3 - math.sqrt(5))
+        local t = (i-1) / math.max(n-1, 1)
+        local y = 1 - t*2
+        local r = math.sqrt(math.max(1 - y*y, 0))
+        local a = golden * (i-1) + angle
+        return Vector3.new(math.cos(a)*r*radius, y*radius, math.sin(a)*r*radius)
+    end,
+    -- Torus: a ring-of-rings (donut). radius=big radius, length*0.2=tube radius
+    Torus = function(i, n, angle, radius, length)
+        local tubeR = math.max(length * 0.15, 0.5)
+        -- distribute evenly: outer angle and tube angle driven by same i
+        local outerA = angle + (i-1) * (2*math.pi / n)
+        local tubeA  = angle*3 + (i-1) * (2*math.pi / n) * 4  -- 4 loops around tube
+        local ox = (radius + tubeR * math.cos(tubeA)) * math.cos(outerA)
+        local oz = (radius + tubeR * math.cos(tubeA)) * math.sin(outerA)
+        local oy = tubeR * math.sin(tubeA)
+        return Vector3.new(ox, oy, oz)
+    end,
+    -- Rose: 3D rhodonea curve, petals spread in XZ, oscillates Y
+    Rose = function(i, n, angle, radius, length)
+        local k = 3  -- 3 petals
+        local t = angle + (i-1) * (2*math.pi / n)
+        local r = radius * math.abs(math.cos(k * t))
+        local x = r * math.cos(t)
+        local z = r * math.sin(t)
+        local y = (length * 0.25) * math.sin(k * t)
+        return Vector3.new(x, y, z)
+    end,
+    -- Trefoil Knot: a classic 3D mathematical knot
+    Trefoil = function(i, n, angle, radius, _length)
+        local t = angle + (i-1) * (2*math.pi / n)
+        local s = radius * 0.35
+        local x = s * (math.sin(t) + 2*math.sin(2*t))
+        local y = s * (math.cos(t) - 2*math.cos(2*t))
+        local z = s * (-math.sin(3*t))
+        return Vector3.new(x, z, y)  -- reorder so Y is vertical
+    end,
+    -- Galaxy: logarithmic spiral in XZ, slight Y-wave for 3D depth
+    Galaxy = function(i, n, angle, radius, length)
+        local arms = 2
+        local arm  = (i-1) % arms
+        local idx2 = math.floor((i-1) / arms)
+        local t    = angle + idx2 * (2*math.pi / math.ceil(n/arms))
+        local r    = radius * (0.2 + 0.8 * (idx2 / math.max(math.ceil(n/arms)-1, 1)))
+        local armA = t + arm * math.pi
+        local x    = r * math.cos(armA)
+        local z    = r * math.sin(armA)
+        local y    = (length*0.1) * math.sin(2*t + arm*math.pi)
+        return Vector3.new(x, y, z)
+    end,
+    -- Vortex: tightening helix that collapses toward centre
+    Vortex = function(i, n, angle, radius, length)
+        local t = (i-1) / math.max(n-1, 1)
+        local a = angle + (i-1) * (2*math.pi / n) * 2
+        local r = radius * (1 - t*0.85)
+        local y = (t - 0.5) * length
+        return Vector3.new(math.cos(a)*r, y, math.sin(a)*r)
+    end,
+    -- Figure8-3D: a figure-8 that tilts up into a full 3D loop
+    ["Figure8-3D"] = function(i, n, angle, radius, length)
+        local t  = angle + (i-1) * (2*math.pi / n)
+        local x  = radius * math.sin(t)
+        local y  = (length*0.3) * math.sin(2*t)
+        local z  = radius * math.sin(t) * math.cos(t)
+        return Vector3.new(x, y, z)
+    end,
+    -- Hyperboloid: two cones joined at the waist (ruled surface)
+    Hyperboloid = function(i, n, angle, radius, length)
+        local a = angle + (i-1) * (2*math.pi / n)
+        local t = math.cos(angle*0.7 + (i-1) * (math.pi / n))  -- vertical sweep
+        local r = math.sqrt(radius^2 + (length*0.3*t)^2 / radius^2)
+        return Vector3.new(math.cos(a)*r, t*length*0.4, math.sin(a)*r)
+    end,
 }
-local PATTERN_NAMES = {"Circle","Helix","Infinity-8","Lissajous","DNA","Polygon","Spiral","Cardioid"}
+local PATTERN_NAMES = {
+    "Circle","Helix","Infinity-8","Lissajous","DNA",
+    "Polygon","Spiral","Cardioid",
+    "Sphere","Torus","Rose","Trefoil","Galaxy","Vortex","Figure8-3D","Hyperboloid",
+}
 
 local FACE_AXES = {
     None   = nil,
@@ -19852,7 +19965,7 @@ makeAngleBox(angleRow, "Z", 3, function(v) _ringAngleZ=v end)
 
 makeSection(gR, "── Pattern & Aim ────────────────────────────────")
 makeDropdown(gR, "Ring Pattern", PATTERN_NAMES, "Circle", function(v) _ringPattern=v end)
-makeSection(gR, "Circle=orbit | Helix=spiral | Infinity-8 | Lissajous | DNA | Polygon | Spiral | Cardioid")
+makeSection(gR, "Circle | Helix | Infinity-8 | Lissajous | DNA | Polygon | Spiral | Cardioid | Sphere | Torus | Rose | Trefoil | Galaxy | Vortex | Figure8-3D | Hyperboloid")
 makeToggle(gR, "Aim bricks at host", function(on) _ringAimOn=on; if not on then _ringAimFace="None" end end,
     false, "Orient selected face of each brick toward the host's HRP.")
 makeDropdown(gR, "Aim face", {"None","Front","Back","Left","Right","Top","Bottom"}, "None",
@@ -19995,57 +20108,153 @@ do
         return t and t.Character and t.Character:FindFirstChild("HumanoidRootPart")
     end
 
-    -- Formation definitions: return list of CFrame offsets relative to host HRP
+    -- Formation definitions: return list of CFrame offsets relative to host HRP.
+    -- All offsets are relative to the HumanoidRootPart (centre of body).
+    -- Anatomy references (approximate Roblox R15):
+    --   HRP is ~1 stud above floor. Head ≈ +2.5 Y. Hands ≈ ±1.5 X, +1 Y, +0.5 Z.
     local FORMATIONS = {
+        -- ── Wings: feathered sweep with natural curve & 3D depth ──
         ["Wings"] = function(n)
             local offsets = {}
             local half = math.ceil(n/2)
+            -- Left wing (negative X)
             for i = 1, half do
-                local t = i/half
-                local x = -3 - t*3; local y = t*2; local z = 0
-                offsets[#offsets+1] = CFrame.new(x, y, z) * CFrame.Angles(0,0, math.rad(30*t))
+                local t  = i / half
+                local x  = -(2 + t * 4)          -- spread from 2→6 studs left
+                local y  = 1.5 + t * 1.2          -- sweep upward toward shoulder blade height
+                local z  = t * t * 1.5             -- curve backward (feather arc)
+                local rx  = math.rad(-15 * t)      -- droop angle
+                local rz  = math.rad(25 * t)       -- dihedral lift
+                offsets[#offsets+1] = CFrame.new(x, y, z) * CFrame.Angles(rx, 0, rz)
             end
+            -- Right wing (positive X, mirrored)
             for i = 1, n - half do
-                local t = i/(n-half)
-                local x = 3 + t*3; local y = t*2; local z = 0
-                offsets[#offsets+1] = CFrame.new(x, y, z) * CFrame.Angles(0,0,-math.rad(30*t))
+                local t  = i / (n - half)
+                local x  = 2 + t * 4
+                local y  = 1.5 + t * 1.2
+                local z  = t * t * 1.5
+                local rx  = math.rad(-15 * t)
+                local rz  = math.rad(-25 * t)
+                offsets[#offsets+1] = CFrame.new(x, y, z) * CFrame.Angles(rx, 0, rz)
             end
             return offsets
         end,
+        -- ── Sword: held in right hand, pointing forward ────────────
+        -- Right hand ≈ (+1.5 X, +1.0 Y, +0.5 Z relative to HRP)
         ["Sword"] = function(n)
             local offsets = {}
+            local spacing = 1.5   -- compact blade
+            -- First brick is the hilt (at hand), rest extend forward
             for i = 1, n do
-                offsets[#offsets+1] = CFrame.new(0, 0, -i * 2) * CFrame.Angles(0, 0, 0)
+                local z = -(i - 0.5) * spacing      -- negative Z = forward in Roblox
+                offsets[#offsets+1] = CFrame.new(1.5, 1.0, 0.5 + z)
+                    * CFrame.Angles(0, 0, math.rad(-10))  -- slight forward tilt
             end
             return offsets
         end,
+        -- ── Staff: held in left hand, rising vertically ────────────
+        -- Left hand ≈ (-1.5 X, +1.0 Y, +0.5 Z)
         ["Staff"] = function(n)
             local offsets = {}
+            local spacing = 1.4
             for i = 1, n do
-                offsets[#offsets+1] = CFrame.new(0, i * 2, 0)
+                local y = (i - 1) * spacing          -- rises upward from grip
+                offsets[#offsets+1] = CFrame.new(-1.5, 1.0 + y, 0.5)
+                    * CFrame.Angles(math.rad(5), 0, math.rad(8))  -- slight tilt outward
             end
             return offsets
         end,
+        -- ── Halo: small ring floating just above head ──────────────
+        -- Head top ≈ +3.2 Y above HRP. Halo should be ~0.5 above that.
         ["Halo"] = function(n)
             local offsets = {}
+            local r = 1.3   -- tighter radius (fits head, not torso)
             for i = 1, n do
                 local a = (i-1) * (2*math.pi / n)
-                offsets[#offsets+1] = CFrame.new(math.cos(a)*4, 4, math.sin(a)*4)
+                offsets[#offsets+1] = CFrame.new(math.cos(a)*r, 3.7, math.sin(a)*r)
+                    * CFrame.Angles(0, a, math.rad(15))  -- each brick tilted radially
             end
             return offsets
         end,
+        -- ── Shield: wall of bricks in front, grid with slight curve ─
         ["Shield"] = function(n)
             local offsets = {}
             local cols = math.ceil(math.sqrt(n))
+            local rows = math.ceil(n / cols)
             for i = 1, n do
                 local row = math.floor((i-1)/cols)
                 local col = (i-1) % cols
-                offsets[#offsets+1] = CFrame.new((col - cols/2)*1.2, (row - cols/2)*1.2, -4)
+                local cx  = (col - (cols-1)/2) * 1.1
+                local cy  = (row - (rows-1)/2) * 1.1 + 1.0   -- centred on torso, not floor
+                -- slight curve: more z offset at edges
+                local curveZ = cx*cx * 0.06
+                offsets[#offsets+1] = CFrame.new(cx, cy, -3.5 - curveZ)
+                    * CFrame.Angles(0, math.rad(-cx * 4), 0)  -- curved inward
+            end
+            return offsets
+        end,
+        -- ── Crown: tiara-style ring around head with upward spikes ──
+        ["Crown"] = function(n)
+            local offsets = {}
+            local r = 1.5
+            local spikes = math.ceil(n / 2)
+            local base   = n - spikes
+            -- Base band
+            for i = 1, base do
+                local a = (i-1) * (2*math.pi / math.max(base,1))
+                offsets[#offsets+1] = CFrame.new(math.cos(a)*r, 3.0, math.sin(a)*r)
+            end
+            -- Spikes
+            for i = 1, spikes do
+                local a  = (i-1) * (2*math.pi / math.max(spikes,1))
+                local sh = 0.8 + 0.5 * math.abs(math.cos(a*1.5))   -- varying heights
+                offsets[#offsets+1] = CFrame.new(math.cos(a)*r, 3.0 + sh, math.sin(a)*r)
+                    * CFrame.Angles(math.rad(-15), a, 0)
+            end
+            return offsets
+        end,
+        -- ── Cloak: draping cape behind player ────────────────────────
+        -- Hangs from shoulders (≈ ±1.5X, +2Y) down behind (+Z is behind)
+        ["Cloak"] = function(n)
+            local offsets = {}
+            local cols = math.max(2, math.ceil(math.sqrt(n * 0.6)))
+            for i = 1, n do
+                local row = math.floor((i-1)/cols)
+                local col = (i-1) % cols
+                local cx  = (col - (cols-1)/2) * 1.15
+                local cy  = 2.0 - row * 1.0          -- drops downward
+                local cz  = 1.2 + row * 0.3           -- flares outward behind
+                -- slight lateral curve (cape billowing)
+                local curveX = cx * 0.15 * row
+                offsets[#offsets+1] = CFrame.new(cx + curveX, cy, cz)
+                    * CFrame.Angles(math.rad(row * 8), 0, math.rad(cx * 3))
+            end
+            return offsets
+        end,
+        -- ── Armour: shoulder pads + chestplate distributed on body ───
+        ["Armour"] = function(n)
+            local offsets = {}
+            -- Anchor points: shoulders, chest, back
+            local slots = {
+                {x= 2.2, y=2.0, z= 0,    rx=0,   ry=0,   rz= 20},  -- L shoulder pad
+                {x=-2.2, y=2.0, z= 0,    rx=0,   ry=0,   rz=-20},  -- R shoulder pad
+                {x= 0,   y=1.2, z=-1.2,  rx=0,   ry=0,   rz=  0},  -- chest centre
+                {x= 1.0, y=1.2, z=-1.2,  rx=0,   ry=0,   rz=  5},  -- chest right
+                {x=-1.0, y=1.2, z=-1.2,  rx=0,   ry=0,   rz= -5},  -- chest left
+                {x= 0,   y=1.2, z= 1.2,  rx=0,   ry=180, rz=  0},  -- back plate
+                {x= 1.5, y=0.0, z=-0.8,  rx=0,   ry=0,   rz= 15},  -- right arm guard
+                {x=-1.5, y=0.0, z=-0.8,  rx=0,   ry=0,   rz=-15},  -- left arm guard
+            }
+            for i = 1, n do
+                local s = slots[((i-1) % #slots) + 1]
+                local extra = math.floor((i-1) / #slots)  -- stack extras on top
+                offsets[#offsets+1] = CFrame.new(s.x, s.y + extra*0.5, s.z)
+                    * CFrame.Angles(math.rad(s.rx), math.rad(s.ry), math.rad(s.rz))
             end
             return offsets
         end,
     }
-    local FORMATION_NAMES = {"Wings","Sword","Staff","Halo","Shield"}
+    local FORMATION_NAMES = {"Wings","Sword","Staff","Halo","Shield","Crown","Cloak","Armour"}
 
     local _cosFormation = "Wings"
     local _cosFollowAngle = false
@@ -20058,7 +20267,7 @@ do
         function(v) _cosHostName = v end)
     makeDropdown(cosmeticsPage, "Formation", FORMATION_NAMES, "Wings",
         function(v) _cosFormation = v end)
-    makeSection(cosmeticsPage, "Wings=wing pair | Sword=forward blade | Staff=vertical pole | Halo=head ring | Shield=front wall")
+    makeSection(cosmeticsPage, "Wings=curved wing pair | Sword=right hand blade | Staff=left hand pole | Halo=head ring | Shield=curved wall | Crown=spiked tiara | Cloak=draping cape | Armour=body plates")
     makeToggle(cosmeticsPage, "Follow Player's Angle", function(on) _cosFollowAngle=on end, false,
         "Formation rotates with host yaw -- good for wings/sword.")
 
@@ -20188,20 +20397,45 @@ do
         _ringBumpOwnership()
         task.wait(0.05)
 
-        local dir = hrp.CFrame.LookVector
-        local spread = 1.5
+        local camCF  = workspace.CurrentCamera and workspace.CurrentCamera.CFrame or hrp.CFrame
+        local forward = camCF.LookVector
+        local right   = camCF.RightVector
+        local up      = camCF.UpVector
+
+        -- Fibonacci hemisphere spread: bricks fan out in a 3D cone/hemisphere
+        -- from the player's look direction, giving a spherical shotgun feel.
+        local halfCone = math.rad(35)   -- half-angle of the spread cone
 
         for i = 1, count do
             local b = pool[i]
             if not b or not b.Parent then continue end
-            local offset = Vector3.new((i - count/2 - 0.5)*spread, 0, 0)
-            local startPos = hrp.Position + dir*4 + offset
+
+            -- Fibonacci-sphere point on a hemisphere cap
+            local golden = math.pi * (3 - math.sqrt(5))
+            local t      = (i - 1) / math.max(count - 1, 1)
+            local theta  = math.acos(1 - t * (1 - math.cos(halfCone)))  -- elevation within cone
+            local phi    = golden * (i - 1)                               -- azimuthal spread
+
+            -- Convert spherical to local direction
+            local sinT = math.sin(theta)
+            local dir  = (forward * math.cos(theta))
+                       + (right   * sinT * math.cos(phi))
+                       + (up      * sinT * math.sin(phi))
+            dir = dir.Unit
+
+            -- Launch position: spread in a small cluster around chest
+            local spread = 0.6
+            local startPos = hrp.Position
+                + forward * 2.5
+                + right   * (math.random() - 0.5) * spread
+                + up      * (math.random() - 0.5) * spread + Vector3.new(0, 0.5, 0)
 
             task.spawn(function()
                 local traveled = 0
-                local prevPos  = startPos
                 b.CFrame = CFrame.new(startPos)
-                if _throwGravless then b.AssemblyLinearVelocity = Vector3.zero end
+                if _throwGravless then
+                    pcall(function() b.AssemblyLinearVelocity = Vector3.zero end)
+                end
 
                 local throwConn
                 throwConn = RunService.Heartbeat:Connect(function(dt)
@@ -20217,7 +20451,6 @@ do
                     if traveled >= _throwDist then
                         throwConn:Disconnect()
                         if _throwReturn then
-                            -- Fly back
                             local returnConn
                             returnConn = RunService.Heartbeat:Connect(function(dt2)
                                 if not b or not b.Parent then returnConn:Disconnect(); return end
@@ -20246,7 +20479,7 @@ do
                 end)
             end)
         end
-        notify("Attacks","Thrown " .. count .. " brick(s).")
+        notify("Attacks","Thrown " .. count .. " brick(s) in a 3D burst.")
     end)
 
     makeSection(attacksPage, "── Laser (Brick Beam) ──────────────────────────")
@@ -20484,6 +20717,7 @@ do
     local _cloneRadius   = 8
     local _cloneHostName = "Myself"
     local _cloneFollow   = false
+    local _cloneOwnTimer = 0   -- periodic ownership re-assert (server visibility)
 
     local function _cloneGetHostHRP(name)
         if name == "Myself" or name == lp.Name then
@@ -20534,9 +20768,16 @@ do
             end
             _ringBumpOwnership()
             _cloneActive = true
-            cloneStatusLbl.Text = "Clone ring: active O " .. #_cloneHRPs .. " clones"
+            _cloneOwnTimer = 0
+            cloneStatusLbl.Text = "Clone ring: active ● " .. #_cloneHRPs .. " clones"
             _cloneConn = RunService.Heartbeat:Connect(function(dt)
                 if not _cloneActive then return end
+                -- Re-assert network ownership every 0.4s so server sees the movement
+                _cloneOwnTimer = _cloneOwnTimer + dt
+                if _cloneOwnTimer >= 0.4 then
+                    _cloneOwnTimer = 0
+                    _ringBumpOwnership()
+                end
                 _cloneAngle = _cloneAngle + (_cloneSpeed / math.max(_cloneRadius,0.5)) * dt
                 local hrp = _cloneGetHostHRP(_cloneHostName)
                 if not hrp then return end
@@ -20590,10 +20831,13 @@ do
         for _, ch in ipairs(clones) do
             task.spawn(function()
                 local traveled = 0
+                local ownT     = 0
                 local throwConn
                 throwConn = RunService.Heartbeat:Connect(function(dt)
                     if not ch or not ch.Parent then throwConn:Disconnect(); return end
                     traveled = traveled + _cloneThrowSpeed * dt
+                    ownT     = ownT + dt
+                    if ownT >= 0.35 then ownT = 0; _ringBumpOwnership() end
                     if traveled >= _cloneThrowDist then
                         throwConn:Disconnect()
                         pcall(function() ch.AssemblyLinearVelocity = Vector3.zero end)
