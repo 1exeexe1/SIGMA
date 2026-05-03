@@ -4648,6 +4648,7 @@ sv = {
     dragging = false, dragKey = nil,
     dragStartMouse = Vector3.zero, dragStartOrigin = Vector3.zero,
     dragStartSX=1, dragStartSY=1, dragStartSZ=1,
+    moveArea = false,
     buildName = "my_section",
 }
 
@@ -4685,7 +4686,8 @@ local function svSyncZone()
     svHandles.px.CFrame=CFrame.new(center+Vector3.new( hx,0,0)); svHandles.nx.CFrame=CFrame.new(center+Vector3.new(-hx,0,0))
     svHandles.py.CFrame=CFrame.new(center+Vector3.new(0, hy,0)); svHandles.ny.CFrame=CFrame.new(center+Vector3.new(0,-hy,0))
     svHandles.pz.CFrame=CFrame.new(center+Vector3.new(0,0, hz)); svHandles.nz.CFrame=CFrame.new(center+Vector3.new(0,0,-hz))
-    for _,h in pairs(svHandles) do h.Transparency=0.35; local hl=h:FindFirstChild("SVH_HL"); if hl then hl.Enabled=true end end
+    local vis=not sv.moveArea
+    for _,h in pairs(svHandles) do h.Transparency=vis and 0.35 or 1; local hl=h:FindFirstChild("SVH_HL"); if hl then hl.Enabled=vis end end
 end
 
 -- Save floating menu
@@ -4838,6 +4840,13 @@ local function svHandleClick()
     if not sv.equipped then return end
     local target=_svMouse.Target; if not target then return end
     local hitPos=_svMouse.Hit.Position
+    -- moveArea: clicks reposition zone rather than resize
+    if sv.moveArea then
+        local nv=CT_NORM_VEC[_svMouse.TargetSurface] or Vector3.new(0,1,0)
+        local hp=_svMouse.Hit.Position
+        if hp.Magnitude<5000 then sv.origin=snapToGrid(hp+nv*(CT_GRID*0.5)); sv.placed=true; svSyncZone(); svSizeLblUpdate() end
+        return
+    end
     -- Check if clicking a resize handle
     -- Pass 1: exact target match
     local hitKey = nil
@@ -4915,7 +4924,7 @@ _ctoolVirtualUnequip["Save"] = function()
     if _svClickConn then _svClickConn:Disconnect(); _svClickConn=nil end
     if _svUpConn    then _svUpConn:Disconnect(); _svUpConn=nil end
     if _svDragConn  then _svDragConn:Disconnect(); _svDragConn=nil end
-    sv.dragging=false; sv.dragKey=nil
+    sv.dragging=false; sv.dragKey=nil; sv.moveArea=false
     svSelBox.Adornee=nil; for _,h in pairs(svHandles) do h.Transparency=1 end
 end
 
@@ -10393,6 +10402,10 @@ local _aiHttpRequest = (syn and syn.request)
     or (fluxus and fluxus.request)
     or nil
 
+-- _chatLogBuf must be declared BEFORE _aiGetGameContext so the function
+-- closes over the correct upvalue (Lua local scope is lexical).
+local _chatLogBuf = getgenv()._sigmaChatLog or {}
+
 -- ── Live game-context builder (called fresh every send) ───────
 local function _aiGetGameContext()
     local LP   = game:GetService("Players").LocalPlayer
@@ -10526,10 +10539,6 @@ local function _aiGetGameContext()
     ln("=== END CONTEXT ===")
     return table.concat(out, "\n")
 end
-
--- Forward declaration so _aiGetGameContext can reference _chatLogBuf
--- before the chat-log block (which appears later in the file) is executed.
-local _chatLogBuf = getgenv()._sigmaChatLog or {}
 
 -- ── Jarvis Action Registry ─────────────────────────────────────
 -- Maps the friendly keys Jarvis emits → actual panel side effects.
@@ -21788,7 +21797,19 @@ end)
 local brWaveMode=true
 brMkToggle("Wave Paint (BFS)",4,function(on) brWaveMode=on end)
 brMkToggle("Move Area",5,function(on) br.moveArea=on
-    if br.placed then for _,h in pairs(brHandles) do h.Transparency=on and 1 or 0.35 end end
+    if br.placed then
+        for _,h in pairs(brHandles) do
+            h.Transparency=on and 1 or 0.35
+            local hl=h:FindFirstChild("BRH_HL"); if hl then hl.Enabled=not on end
+        end
+    end
+    if on then
+        if _brDragConn then _brDragConn:Disconnect(); _brDragConn=nil end
+    else
+        if br.equipped and not _brDragConn then
+            _brDragConn=RunService.RenderStepped:Connect(brHandleDrag)
+        end
+    end
 end)
 
 brMkBtn("\240\159\142\168 Paint Zone",6,true,function(btn)
@@ -22075,7 +22096,19 @@ local _dmModeBtn=dmMkBtn("Mode: Delete",2,false,function(b)
 end)
 
 dmMkToggle("Move Area",3,function(on) dm.moveArea=on
-    if dm.placed then for _,h in pairs(dmHandles) do h.Transparency=on and 1 or 0.35 end end
+    if dm.placed then
+        for _,h in pairs(dmHandles) do
+            h.Transparency=on and 1 or 0.35
+            local hl=h:FindFirstChild("DMH_HL"); if hl then hl.Enabled=not on end
+        end
+    end
+    if on then
+        if _dmDragConn then _dmDragConn:Disconnect(); _dmDragConn=nil end
+    else
+        if dm.equipped and not _dmDragConn then
+            _dmDragConn=RunService.RenderStepped:Connect(dmHandleDrag)
+        end
+    end
 end)
 
 dmMkBtn("\240\159\146\165 Demolish Zone",4,true,function(btn)
@@ -22465,10 +22498,11 @@ do
     -- Move Selected Area toggle (universal, moved here from ct compact menu)
     makeToggle(g,"Move Selected Area",function(on)
         _scaMoveArea = on
-        -- Sync to all three tools
+        -- Sync to all four tools
         ct.moveArea = on
         br.moveArea = on
         dm.moveArea = on
+        sv.moveArea = on
         -- Show/hide handles based on move mode
         if ct.placed then
             for _,h in pairs(ctHandles) do
@@ -22477,10 +22511,39 @@ do
             end
         end
         if br.placed then
-            for _,h in pairs(brHandles) do h.Transparency = on and 1 or 0.35 end
+            for _,h in pairs(brHandles) do
+                h.Transparency = on and 1 or 0.35
+                local hl=h:FindFirstChild("BRH_HL"); if hl then hl.Enabled = not on end
+            end
         end
         if dm.placed then
-            for _,h in pairs(dmHandles) do h.Transparency = on and 1 or 0.35 end
+            for _,h in pairs(dmHandles) do
+                h.Transparency = on and 1 or 0.35
+                local hl=h:FindFirstChild("DMH_HL"); if hl then hl.Enabled = not on end
+            end
+        end
+        if sv.placed then
+            for _,h in pairs(svHandles) do
+                h.Transparency = on and 1 or 0.35
+                local hl=h:FindFirstChild("SVH_HL"); if hl then hl.Enabled = not on end
+            end
+        end
+        -- Disconnect RenderStepped drag conns while in moveArea to prevent
+        -- handle-drag code firing on click-to-reposition frames (jitter fix).
+        if on then
+            if _brDragConn then _brDragConn:Disconnect(); _brDragConn=nil end
+            if _dmDragConn then _dmDragConn:Disconnect(); _dmDragConn=nil end
+            if _svDragConn then _svDragConn:Disconnect(); _svDragConn=nil end
+        else
+            if br.equipped and not _brDragConn then
+                _brDragConn=RunService.RenderStepped:Connect(brHandleDrag)
+            end
+            if dm.equipped and not _dmDragConn then
+                _dmDragConn=RunService.RenderStepped:Connect(dmHandleDrag)
+            end
+            if sv.equipped and not _svDragConn then
+                _svDragConn=RunService.RenderStepped:Connect(svHandleDrag)
+            end
         end
     end, false)
 end
