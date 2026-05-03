@@ -11433,7 +11433,7 @@ local function _jSendWithProbe(userMsg, statusLbl, onDone)
             if answer   ~= "" then parts[#parts+1] = "Answer: "  .. answer   end
             if abstract ~= "" then parts[#parts+1] = "Summary: " .. abstract end
             if related  ~= "" then parts[#parts+1] = "Related: " .. related  end
-            if #parts   == 0  then return "(web search: no results for \"..query.."\"))" end
+            if #parts   == 0  then return "(web search: no results for \""..query.."\")" end
             return table.concat(parts, "\n")
         end)
         local out = ok and result or ("(web search error: "..tostring(result)..")")
