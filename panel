@@ -4839,14 +4839,33 @@ local function svHandleClick()
     local target=_svMouse.Target; if not target then return end
     local hitPos=_svMouse.Hit.Position
     -- Check if clicking a resize handle
-    for key,h in pairs(svHandles) do
-        if target==h then
-            sv.dragging=true; sv.dragKey=key
-            sv.dragStartMouse=hitPos
-            sv.dragStartOrigin=sv.origin
-            sv.dragStartSX=sv.sX; sv.dragStartSY=sv.sY; sv.dragStartSZ=sv.sZ
-            return
+    -- Pass 1: exact target match
+    local hitKey = nil
+    for key, h in pairs(svHandles) do
+        if target == h then hitKey = key; break end
+    end
+    -- Pass 2: screen-space proximity (same as Construct mode).
+    if not hitKey and sv.placed then
+        local cam      = Workspace.CurrentCamera
+        local mx, my   = _svMouse.X, _svMouse.Y
+        local bestDist = 28
+        for key, h in pairs(svHandles) do
+            if h.Transparency < 1 then
+                local sp, inView = cam:WorldToViewportPoint(h.Position)
+                if inView then
+                    local dx = sp.X - mx; local dy = sp.Y - my
+                    local d  = math.sqrt(dx*dx + dy*dy)
+                    if d < bestDist then bestDist = d; hitKey = key end
+                end
+            end
         end
+    end
+    if hitKey then
+        sv.dragging=true; sv.dragKey=hitKey
+        sv.dragStartMouse=hitPos
+        sv.dragStartOrigin=sv.origin
+        sv.dragStartSX=sv.sX; sv.dragStartSY=sv.sY; sv.dragStartSZ=sv.sZ
+        return
     end
     if _scaRefreshOnClick or not sv.placed then
         local nv=CT_NORM_VEC[_svMouse.TargetSurface] or Vector3.new(0,1,0)
@@ -10508,6 +10527,10 @@ local function _aiGetGameContext()
     return table.concat(out, "\n")
 end
 
+-- Forward declaration so _aiGetGameContext can reference _chatLogBuf
+-- before the chat-log block (which appears later in the file) is executed.
+local _chatLogBuf = getgenv()._sigmaChatLog or {}
+
 -- ── Jarvis Action Registry ─────────────────────────────────────
 -- Maps the friendly keys Jarvis emits → actual panel side effects.
 -- Jarvis knows these as feature names, not as code.
@@ -11243,7 +11266,8 @@ _jLoadSessions()
 -- context: most recent page first.
 local CHAT_LOG_MAX  = 300   -- total messages kept
 local CHAT_LOG_PAGE = 100   -- messages per context-injection page
-local _chatLogBuf   = getgenv()._sigmaChatLog or {}
+-- _chatLogBuf forward-declared above _aiGetGameContext; sync getgenv() here.
+_chatLogBuf = getgenv()._sigmaChatLog or _chatLogBuf
 getgenv()._sigmaChatLog = _chatLogBuf
 
 local function _chatLogPush(speaker, text)
@@ -15125,14 +15149,33 @@ do
         local target=_clMouse.Target; if not target then return end
         local hitPos=_clMouse.Hit.Position
         -- Check if clicking a resize handle
-        for key,h in pairs(cloneZoneHandles) do
-            if target==h then
-                cloneZone.dragging=true; cloneZone.dragKey=key
-                cloneZone.dragStartMouse=hitPos
-                cloneZone.dragStartOrigin=cloneZone.origin
-                cloneZone.dragStartSX=cloneZone.sX; cloneZone.dragStartSY=cloneZone.sY; cloneZone.dragStartSZ=cloneZone.sZ
-                return
+        -- Pass 1: exact target match
+        local hitKey = nil
+        for key, h in pairs(cloneZoneHandles) do
+            if target == h then hitKey = key; break end
+        end
+        -- Pass 2: screen-space proximity (handles occluded by blocks)
+        if not hitKey and cloneZone.placed then
+            local cam      = Workspace.CurrentCamera
+            local mx, my   = _clMouse.X, _clMouse.Y
+            local bestDist = 28
+            for key, h in pairs(cloneZoneHandles) do
+                if h.Transparency < 1 then
+                    local sp, inView = cam:WorldToViewportPoint(h.Position)
+                    if inView then
+                        local dx = sp.X - mx; local dy = sp.Y - my
+                        local d  = math.sqrt(dx*dx + dy*dy)
+                        if d < bestDist then bestDist = d; hitKey = key end
+                    end
+                end
             end
+        end
+        if hitKey then
+            cloneZone.dragging=true; cloneZone.dragKey=hitKey
+            cloneZone.dragStartMouse=hitPos
+            cloneZone.dragStartOrigin=cloneZone.origin
+            cloneZone.dragStartSX=cloneZone.sX; cloneZone.dragStartSY=cloneZone.sY; cloneZone.dragStartSZ=cloneZone.sZ
+            return
         end
         if _scaRefreshOnClick or not cloneZone.placed then
             local nv=CT_NORM_VEC[_clMouse.TargetSurface] or Vector3.new(0,1,0)
@@ -21838,11 +21881,30 @@ local function brHandleClick()
             if hp.Magnitude<5000 then br.origin=snapToGrid(hp+nv*(CT_GRID*0.5)); br.placed=true; brSyncZone(); brSizeLblUpdate() end
         end; return
     end
-    for key,h in pairs(brHandles) do
-        if target==h then
-            br.dragging=true; br.dragKey=key; br.dragStartMouse=_brMouse.Hit.Position
-            br.dragStartOrigin=br.origin; br.dragStartSX=br.sX; br.dragStartSY=br.sY; br.dragStartSZ=br.sZ; return
+    -- Pass 1: exact target match
+    local hitKey = nil
+    for key, h in pairs(brHandles) do
+        if target == h then hitKey = key; break end
+    end
+    -- Pass 2: screen-space proximity (same as Construct mode).
+    if not hitKey and br.placed then
+        local cam      = Workspace.CurrentCamera
+        local mx, my   = _brMouse.X, _brMouse.Y
+        local bestDist = 28
+        for key, h in pairs(brHandles) do
+            if h.Transparency < 1 then
+                local sp, inView = cam:WorldToViewportPoint(h.Position)
+                if inView then
+                    local dx = sp.X - mx; local dy = sp.Y - my
+                    local d  = math.sqrt(dx*dx + dy*dy)
+                    if d < bestDist then bestDist = d; hitKey = key end
+                end
+            end
         end
+    end
+    if hitKey then
+        br.dragging=true; br.dragKey=hitKey; br.dragStartMouse=_brMouse.Hit.Position
+        br.dragStartOrigin=br.origin; br.dragStartSX=br.sX; br.dragStartSY=br.sY; br.dragStartSZ=br.sZ; return
     end
     if target then
         local nv=CT_NORM_VEC[_brMouse.TargetSurface] or Vector3.new(0,1,0)
@@ -22110,11 +22172,30 @@ local function dmHandleClick()
             if hp.Magnitude<5000 then dm.origin=snapToGrid(hp+nv*(CT_GRID*0.5)); dm.placed=true; dmSyncZone(); dmSizeLblUpdate() end
         end; return
     end
-    for key,h in pairs(dmHandles) do
-        if target==h then
-            dm.dragging=true; dm.dragKey=key; dm.dragStartMouse=_dmMouse.Hit.Position
-            dm.dragStartOrigin=dm.origin; dm.dragStartSX=dm.sX; dm.dragStartSY=dm.sY; dm.dragStartSZ=dm.sZ; return
+    -- Pass 1: exact target match
+    local hitKey = nil
+    for key, h in pairs(dmHandles) do
+        if target == h then hitKey = key; break end
+    end
+    -- Pass 2: screen-space proximity (same as Construct mode).
+    if not hitKey and dm.placed then
+        local cam      = Workspace.CurrentCamera
+        local mx, my   = _dmMouse.X, _dmMouse.Y
+        local bestDist = 28
+        for key, h in pairs(dmHandles) do
+            if h.Transparency < 1 then
+                local sp, inView = cam:WorldToViewportPoint(h.Position)
+                if inView then
+                    local dx = sp.X - mx; local dy = sp.Y - my
+                    local d  = math.sqrt(dx*dx + dy*dy)
+                    if d < bestDist then bestDist = d; hitKey = key end
+                end
+            end
         end
+    end
+    if hitKey then
+        dm.dragging=true; dm.dragKey=hitKey; dm.dragStartMouse=_dmMouse.Hit.Position
+        dm.dragStartOrigin=dm.origin; dm.dragStartSX=dm.sX; dm.dragStartSY=dm.sY; dm.dragStartSZ=dm.sZ; return
     end
     if target then
         local nv=CT_NORM_VEC[_dmMouse.TargetSurface] or Vector3.new(0,1,0)
