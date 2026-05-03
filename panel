@@ -1223,41 +1223,45 @@ local ScreenGui  -- forward-declared: assigned after PlayerGui is ready (line ~1
 -- :dismiss() so callers can mutate live toasts (e.g. Enlighten Log).
 -- The global notify(title,text,duration?) fires a one-shot toast.
 do
-    local _toastStack   = {}          -- ordered list of active toast frames
-    local _TOAST_W      = 240         -- toast width  (px)
-    local _TOAST_H      = 52          -- toast height (px)
-    local _TOAST_PAD    = 6           -- gap between toasts (px)
-    local _TOAST_RIGHT  = 10          -- margin from right edge
-    local _TOAST_BOTTOM = 68          -- margin from bottom edge (above hotbar)
-    local _TOAST_DUR    = 4           -- default display seconds
-    local _TOAST_FADE   = 0.35        -- fade-out duration
+    -- All toast constants collapsed into one table → saves 7 main-chunk local slots
+    -- (was: _toastStack, _TOAST_W/H/PAD/RIGHT/BOTTOM/DUR/FADE = 9 slots; now: _TC = 1 slot + 2 fns = 3 total)
+    local _TC = {
+        stack  = {},   -- ordered list of active toast frames
+        W      = 240,  -- toast width  (px)
+        H      = 52,   -- toast height (px)
+        PAD    = 6,    -- gap between toasts (px)
+        RIGHT  = 10,   -- margin from right edge
+        BOTTOM = 68,   -- margin from bottom edge (above hotbar)
+        DUR    = 4,    -- default display seconds
+        FADE   = 0.35, -- fade-out duration
+    }
 
     local function _reflow()
-        local y = _TOAST_BOTTOM
-        for i = #_toastStack, 1, -1 do
-            local f = _toastStack[i]
+        local y = _TC.BOTTOM
+        for i = #_TC.stack, 1, -1 do
+            local f = _TC.stack[i]
             if f and f.Parent then
-                local tgt = UDim2.new(1, -(_TOAST_W + _TOAST_RIGHT), 1, -(y + _TOAST_H))
+                local tgt = UDim2.new(1, -(_TC.W + _TC.RIGHT), 1, -(y + _TC.H))
                 pcall(function()
                     TweenService:Create(f,
                         TweenInfo.new(0.12, Enum.EasingStyle.Quad),
                         {Position = tgt}):Play()
                 end)
-                y = y + _TOAST_H + _TOAST_PAD
+                y = y + _TC.H + _TC.PAD
             else
-                table.remove(_toastStack, i)
+                table.remove(_TC.stack, i)
             end
         end
     end
 
     local function _makeToast(title, text, duration)
         if S.notifyOn == false then return {update=function()end,dismiss=function()end} end
-        duration = duration or _TOAST_DUR
+        duration = duration or _TC.DUR
 
         local f = Instance.new("Frame")
         f.Name            = "SigmaToast"
-        f.Size            = UDim2.new(0, _TOAST_W, 0, _TOAST_H)
-        f.Position        = UDim2.new(1, 10, 1, -(_TOAST_BOTTOM + _TOAST_H))
+        f.Size            = UDim2.new(0, _TC.W, 0, _TC.H)
+        f.Position        = UDim2.new(1, 10, 1, -(_TC.BOTTOM + _TC.H))
         f.BackgroundColor3= T.BG
         f.BorderSizePixel = 0
         f.ZIndex          = 200
@@ -1305,30 +1309,29 @@ do
         bLbl.Parent              = f
         onTheme(function(th) if bLbl.Parent then bLbl.TextColor3 = th.TXT end end)
 
-        table.insert(_toastStack, f)
+        table.insert(_TC.stack, f)
         _reflow()
 
         pcall(function()
             TweenService:Create(f,
                 TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-                {Position = UDim2.new(1, -(_TOAST_W + _TOAST_RIGHT),
-                                      1, -(_TOAST_BOTTOM + _TOAST_H))}):Play()
+                {Position = UDim2.new(1, -(_TC.W + _TC.RIGHT),
+                                      1, -(_TC.BOTTOM + _TC.H))}):Play()
         end)
 
         local dismissed = false
         local function dismiss()
             if dismissed then return end
             dismissed = true
-            -- Slide out to the right, then destroy
             pcall(function()
                 local tw = TweenService:Create(f,
-                    TweenInfo.new(_TOAST_FADE, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+                    TweenInfo.new(_TC.FADE, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
                     {Position = UDim2.new(1, 10, f.Position.Y.Scale, f.Position.Y.Offset),
                      BackgroundTransparency = 1})
                 tw:Play()
                 tw.Completed:Connect(function()
-                    for i, v in ipairs(_toastStack) do
-                        if v == f then table.remove(_toastStack, i); break end
+                    for i, v in ipairs(_TC.stack) do
+                        if v == f then table.remove(_TC.stack, i); break end
                     end
                     pcall(function() f:Destroy() end)
                     _reflow()
@@ -1600,16 +1603,16 @@ do
 end
 
 -- ── COLOR PICKER ─────────────────────────────────────────────
-local _cpFrame, _cpCallback = nil, nil
+local _cp = {frame=nil, cb=nil}  -- was 2 slots (_cpFrame, _cpCallback); now 1
 
 local function closeColorPicker()
-    if _cpFrame then _cpFrame:Destroy(); _cpFrame = nil end
-    _cpCallback = nil
+    if _cp.frame then _cp.frame:Destroy(); _cp.frame = nil end
+    _cp.cb = nil
 end
 
 local function openColorPicker(callback)
     closeColorPicker()
-    _cpCallback = callback
+    _cp.cb = callback
 
     local picker = Instance.new("Frame")
     picker.Name             = "SigmaColorPicker"
@@ -1619,7 +1622,7 @@ local function openColorPicker(callback)
     picker.BorderSizePixel  = 0
     picker.ZIndex           = 80
     picker.Parent           = ScreenGui
-    _cpFrame = picker
+    _cp.frame = picker
 
     local stroke = Instance.new("UIStroke")
     stroke.Color = T.ACCENT; stroke.Thickness = 1.5; stroke.Parent = picker
@@ -1729,7 +1732,7 @@ local function openColorPicker(callback)
         svCursor.Position=UDim2.new(selS,0,1-selV,0)
         preview.BackgroundColor3=Color3.fromHSV(selH,selS,selV)
         syncInputs()
-        if _cpCallback then _cpCallback(Color3.fromHSV(selH,selS,selV)) end
+        if _cp.cb then _cp.cb(Color3.fromHSV(selH,selS,selV)) end
     end
     updateColor()
 
@@ -1759,7 +1762,7 @@ local function openColorPicker(callback)
     end)
 
     local cpRsConn = RunService.Heartbeat:Connect(function()
-        if not _cpFrame then return end
+        if not _cp.frame then return end
         local mp=UserInputService:GetMouseLocation()
         if hueDrag then
             selH=math.clamp((mp.X-hueBar.AbsolutePosition.X)/hueBar.AbsoluteSize.X,0,1); updateColor()
@@ -6423,7 +6426,7 @@ local ctSyncZone, brSyncZone, dmSyncZone
 local ctSizeLblUpdate, brSizeLblUpdate, dmSizeLblUpdate
 local _ctSelBrickSet, _ctMoveAreaSet
 
-do -- ╔═ BUILD SYSTEM INTERNALS ══╗
+local _buildInit = function() -- ╔═ BUILD SYSTEM INTERNALS ══╗
 -- Build constants
 local CTOOL_MODES = {"Construct","Brush","Demolish","Save"}
 local CTOOL_LABEL = {
@@ -23101,3 +23104,4 @@ end
 task.defer(sigmaLoadSettings)
 
 end -- ╚═ BUILD SYSTEM INTERNALS ══╝
+_buildInit()
