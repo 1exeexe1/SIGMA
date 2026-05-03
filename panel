@@ -2744,14 +2744,14 @@ do -- Movement
         if hum then hum.WalkSpeed=on and (S.wsInfinite and math.huge or S.wsValue) or 16 end
     end)
 
-    local _,jpTick,jpBox = makeToggleInput(g,"Jump Power","(50)",function(on,val)
+    local _jp,jpTick,jpBox = makeToggleInput(g,"Jump Power","(50)",function(on,val)
         S.jpEnabled=on; local n=tonumber(val); if n then S.jpValue=n end
         S.jpInfinite=(val:lower()=="inf")
         local hum=lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
         if hum then hum.UseJumpPower=true; hum.JumpPower=on and (S.jpInfinite and math.huge or S.jpValue) or 50 end
     end)
 
-    local _,flyTick,flyBox = makeToggleInput(g,"Fly (E\226\134\145 Q\226\134\147)","(50)",function(on,val)
+    local _fly,flyTick,flyBox = makeToggleInput(g,"Fly (E\226\134\145 Q\226\134\147)","(50)",function(on,val)
         S.flyEnabled=on; local n=tonumber(val); if n then S.flySpeed=n end
         if on then startFly() else stopFly() end
     end)
@@ -3124,10 +3124,10 @@ do -- Server
 
     makeSection(g,"Server Hopper")
 
-    local _,minBox = makeInput(g,"Min Players","0",function(v)
+    local _min,minBox = makeInput(g,"Min Players","0",function(v)
         S.serverHopMinPop = tonumber(v) or 0
     end)
-    local _,maxBox = makeInput(g,"Max Players","999",function(v)
+    local _max,maxBox = makeInput(g,"Max Players","999",function(v)
         S.serverHopMaxPop = tonumber(v) or 999
     end)
 
@@ -3270,7 +3270,7 @@ do -- Server
         end
     end)
 
-    local _,urlBox = makeInput(g,"Script URL", S.sigmaUrl, function(v)
+    local _url,urlBox = makeInput(g,"Script URL", S.sigmaUrl, function(v)
         v = v:match("^%s*(.-)%s*$")
         if v ~= "" then
             S.sigmaUrl = v
@@ -4467,6 +4467,42 @@ local _ctoolVirtualUnequip = {}  -- [modeName] = function()
 local _ctoolActiveMode     = "Construct"  -- current active mode string
 local _ctoolModeBarSetMode = nil          -- set by the mode bar UI once built
 local ctoolTool            = nil          -- forward-declared; assigned in Construction Tool scope
+
+-- ── MATERIAL LOOKUP TABLES ───────────────────────────────────
+-- Declared here (before Save Tool) so the Save Tool button closure
+-- can capture them as upvalues. They were originally after line 6200
+-- which caused MAT_TO_STR to be nil at Save Tool button call time
+-- (forward upvalue = nil → ItemIndex error on b.Material lookup).
+local MAT_TO_STR = {}
+pcall(function()
+    MAT_TO_STR = {
+        [Enum.Material.SmoothPlastic] = "smooth",
+        [Enum.Material.Plastic]       = "plastic",
+        [Enum.Material.CeramicTiles]  = "tiles",
+        [Enum.Material.Brick]         = "bricks",
+        [Enum.Material.WoodPlanks]    = "planks",
+        [Enum.Material.Ice]           = "ice",
+        [Enum.Material.Neon]          = "neon",
+        [Enum.Material.Grass]         = "grass",
+        [Enum.Material.Sand]          = "sand",
+        [Enum.Material.Snow]          = "snow",
+        [Enum.Material.Glass]         = "glass",
+        [Enum.Material.Wood]          = "wood",
+        [Enum.Material.Slate]         = "stone",
+        [Enum.Material.Pebble]        = "pebble",
+        [Enum.Material.Marble]        = "marble",
+        [Enum.Material.Granite]       = "granite",
+        [Enum.Material.DiamondPlate]  = "steel",
+        [Enum.Material.Metal]         = "metal",
+        [Enum.Material.Asphalt]       = "asphalt",
+        [Enum.Material.Concrete]      = "concrete",
+        [Enum.Material.Pavement]      = "pavement",
+    }
+end)
+local STR_TO_MAT = {}
+for mat,str in pairs(MAT_TO_STR) do STR_TO_MAT[str]=mat end
+STR_TO_MAT["smoothplastic"] = Enum.Material.SmoothPlastic
+STR_TO_MAT["pavement"]      = Enum.Material.Pavement
 
 -- ═══ SCA SHARED UTILITY ════════════════════════════════════════
 -- ═══════════════════════════════════════════════════════════════
@@ -6200,38 +6236,6 @@ do  -- ── Spray Aura ──────────────────�
     makeInput(sprayInner,"Speed","0.05",function(v) S.sprayAuraSpeed=tonumber(v) or 0.05 end)
 end
 
-local MAT_TO_STR = {}
-pcall(function()
-    MAT_TO_STR = {
-        [Enum.Material.SmoothPlastic] = "smooth",
-        [Enum.Material.Plastic]       = "plastic",
-        [Enum.Material.CeramicTiles]  = "tiles",
-        [Enum.Material.Brick]         = "bricks",
-        [Enum.Material.WoodPlanks]    = "planks",
-        [Enum.Material.Ice]           = "ice",
-        [Enum.Material.Neon]          = "neon",
-        [Enum.Material.Grass]         = "grass",
-        [Enum.Material.Sand]          = "sand",
-        [Enum.Material.Snow]          = "snow",
-        [Enum.Material.Glass]         = "glass",
-        [Enum.Material.Wood]          = "wood",
-        [Enum.Material.Slate]         = "stone",
-        [Enum.Material.Pebble]        = "pebble",
-        [Enum.Material.Marble]        = "marble",
-        [Enum.Material.Granite]       = "granite",
-        [Enum.Material.DiamondPlate]  = "steel",
-        [Enum.Material.Metal]         = "metal",
-        [Enum.Material.Asphalt]       = "asphalt",
-        [Enum.Material.Concrete]      = "concrete",
-        [Enum.Material.Pavement]      = "pavement",
-    }
-end)
-local STR_TO_MAT = {}
-for mat,str in pairs(MAT_TO_STR) do STR_TO_MAT[str]=mat end
-STR_TO_MAT["smoothplastic"] = Enum.Material.SmoothPlastic
-STR_TO_MAT["pavement"]      = Enum.Material.Pavement
-
-
 -- ═══════════════════════════════════════════════════════════════
 -- ═══ TAB: BUILD ══════════════════════════════
 -- buildPage: sub-tab inside "Build" big tab (declared at top with makeSubTabBar)
@@ -6419,7 +6423,7 @@ local ctSyncZone, brSyncZone, dmSyncZone
 local ctSizeLblUpdate, brSizeLblUpdate, dmSizeLblUpdate
 local _ctSelBrickSet, _ctMoveAreaSet
 
-(function() -- ╔═ BUILD SYSTEM INTERNALS ══╗
+do -- ╔═ BUILD SYSTEM INTERNALS ══╗
 -- Build constants
 local CTOOL_MODES = {"Construct","Brush","Demolish","Save"}
 local CTOOL_LABEL = {
@@ -11329,9 +11333,9 @@ local function _jRequest(userMsg, explicitMessages)
     end
 
     for _, id in ipairs(_jQueue) do
-        if _jExhausted[id] then continue end
+        if not _jExhausted[id] then
         local k = _jGetKey(id)
-        if not k then continue end
+        if k then
 
         local ok, result = pcall(function()
             local body = game:GetService("HttpService"):JSONEncode({
@@ -11367,11 +11371,14 @@ local function _jRequest(userMsg, explicitMessages)
         end)
 
         if ok and result then return result end
-        if ok and result == nil then continue end
-        if not ok then
-            _jExhausted[id] = true
-            notify("Jarvis", k.label .. " request failed  -  trying next.")
+        if not (ok and result == nil) then
+            if not ok then
+                _jExhausted[id] = true
+                notify("Jarvis", k.label .. " request failed  -  trying next.")
+            end
         end
+
+        end end -- k / not exhausted
     end
 
     return "[Jarvis] All queued API keys exhausted or failed."
@@ -11473,10 +11480,9 @@ local function _jSendWithProbe(userMsg, statusLbl, onDone)
 
             for line in (raw.."\n"):gmatch("([^\n]+)\n") do
                 local obj = line:match("^%s*({.+})%s*$")
-                if not obj or not obj:find('"sigma_action"') then continue end
-
+                if obj and obj:find('"sigma_action"') then
                 local action = obj:match('"sigma_action"%s*:%s*"([^"]+)"')
-                if not action then continue end
+                if action then
 
                 if action == "probe" then
                     local code = _jField(obj, "code")
@@ -11546,6 +11552,7 @@ local function _jSendWithProbe(userMsg, statusLbl, onDone)
                 else
                     pcall(_jDispatchActions, obj)
                 end
+                end end -- action / sigma_action
             end
 
             if #toolOutputs > 0 and round < MAX_REACT_ROUNDS then
@@ -11992,7 +11999,7 @@ local function _jStartChatAgent()
                 local origin = cam.CFrame.Position
                 local closest, closestDist = nil, math.huge
                 for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
-                    if p.Name == game:GetService("Players").LocalPlayer.Name then continue end
+                    if p.Name ~= game:GetService("Players").LocalPlayer.Name then
                     local char = p.Character
                     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
                     if hrp then
@@ -12000,6 +12007,7 @@ local function _jStartChatAgent()
                         local dist = (toP - look * toP:Dot(look)).Magnitude
                         if dist < closestDist then closestDist = dist; closest = p end
                     end
+                    end -- not self
                 end
                 if closest then
                     local hrp2 = closest.Character and closest.Character:FindFirstChild("HumanoidRootPart")
@@ -12311,10 +12319,10 @@ do
         notify("Jarvis", "All keys restored for this session.")
     end)
 
-    local _,labelBox = makeInput(_amG, "Label (e.g. OR-Gemini)", "My Key", function() end)
-    local _,urlBox   = makeInput(_amG, "API URL", "https://openrouter.ai/api/v1/chat/completions", function() end)
-    local _,keyBox   = makeInput(_amG, "API Key (sk-...)", "", function() end)
-    local _,modelBox = makeInput(_amG, "Model ID", "google/gemini-2.5-pro-preview", function() end)
+    local _amlbl,labelBox = makeInput(_amG, "Label (e.g. OR-Gemini)", "My Key", function() end)
+    local _amurl,urlBox   = makeInput(_amG, "API URL", "https://openrouter.ai/api/v1/chat/completions", function() end)
+    local _amkey,keyBox   = makeInput(_amG, "API Key (sk-...)", "", function() end)
+    local _ammod,modelBox = makeInput(_amG, "Model ID", "google/gemini-2.5-pro-preview", function() end)
     urlBox.Text = "https://openrouter.ai/api/v1/chat/completions"
     modelBox.Text = "google/gemini-2.5-pro-preview"
 
@@ -12404,8 +12412,8 @@ do
     end
 
     local _,xBox = makeInput(g,"X (studs)","4",function(v) end)
-    local _,yBox = makeInput(g,"Y (studs)","4",function(v) end)
-    local _,zBox = makeInput(g,"Z (studs)","4",function(v) end)
+    local _d2,yBox = makeInput(g,"Y (studs)","4",function(v) end)
+    local _d3,zBox = makeInput(g,"Z (studs)","4",function(v) end)
     xBox.Text="4"; yBox.Text="4"; zBox.Text="4"
 
     makeButton(g,"Apply Size",function(btn)
@@ -15222,7 +15230,7 @@ do
     local dbgPage = dbgPage_ref  -- sub-tab inside "Main" big tab
     local g=makeGroup(dbgPage,"Notify Tester","Fires a toast through Sigma's notify() system  -  confirms the stack works.")
     local _,titleBox = makeInput(g,"Title","Sigma","function() end")
-    local _,bodyBox  = makeInput(g,"Body","Test message!","function() end")
+    local _d2,bodyBox  = makeInput(g,"Body","Test message!","function() end")
     titleBox.Text="Sigma"; bodyBox.Text="If you see this, notify() works!"
     makeButton(g,"Fire Test Toast",function()
         local t=titleBox.Text~="" and titleBox.Text or "Sigma"
@@ -16518,7 +16526,7 @@ do
         "Stack all boomboxes in your backpack to amplify volume. Each extra boombox = +1 layer of audio.")
 
     local _,volumeBox = makeInput(g, "Volume (# boomboxes)", "max", function() end)
-    local _,audioBox  = makeInput(g, "Audio ID", "142376088", function() end)
+    local _d2,audioBox  = makeInput(g, "Audio ID", "142376088", function() end)
     volumeBox.Text = "max"
     audioBox.Text  = "142376088"
 
@@ -16624,7 +16632,7 @@ do
     makeSection(g, "Ring of Boomboxes  -  drops clones around you, locked in place")
 
     local _,ringCountBox = makeInput(g, "Ring count (1–8)", "4", function() end)
-    local _,ringIdBox    = makeInput(g, "Audio ID", "142376088", function() end)
+    local _d2,ringIdBox    = makeInput(g, "Audio ID", "142376088", function() end)
     ringCountBox.Text = "4"
     ringIdBox.Text    = "142376088"
 
@@ -19625,8 +19633,7 @@ local function _ringTickInstance(dt, params, state)
     local basePos = hrp.Position
 
     for i, part in ipairs(state.parts) do
-        if not part or not part.Parent then continue end
-
+        if part and part.Parent then
         local offset   = patFn(i, n, state.angle, radius, params.length)
         local rotated  = yawCF * tiltCF * offset
         local worldPos = basePos + rotated
@@ -19658,6 +19665,7 @@ local function _ringTickInstance(dt, params, state)
         end
 
         pcall(function() part.CFrame = cf end)
+        end -- part valid
     end
 end
 
@@ -20339,7 +20347,7 @@ do
     local _, cosSourceSetValues = makeDropdown(cosmeticsPage,
         "Brick Source", {"My Folder","Workspace Unanchored"}, "My Folder",
         function(v) _cosSource = v end)
-    local _, cosHostSetValues = makeDropdown(cosmeticsPage,
+    local _d2, cosHostSetValues = makeDropdown(cosmeticsPage,
         "Host", {"Myself"}, "Myself",
         function(v) _cosHostName = v end)
     makeDropdown(cosmeticsPage, "Formation", FORMATION_NAMES, "Wings",
@@ -20460,14 +20468,14 @@ do
         local _, txtSrcSetValues = makeDropdown(cosmeticsPage,
             "Text Source", {"My Folder","Workspace Unanchored"}, "My Folder",
             function(v) _txtSource = v end)
-        local _, txtHostSetValues = makeDropdown(cosmeticsPage,
+        local _d2, txtHostSetValues = makeDropdown(cosmeticsPage,
             "Text Host", {"Myself"}, "Myself",
             function(v) _txtHost = v end)
-        local _, txtBox = makeInput(cosmeticsPage, "Text", "SIGMA",
+        local _d3, txtBox = makeInput(cosmeticsPage, "Text", "SIGMA",
             function(v) _txtText = v end)
-        local _, txtScaleBox = makeInput(cosmeticsPage, "Scale (studs/cell)", "4",
+        local _d4, txtScaleBox = makeInput(cosmeticsPage, "Scale (studs/cell)", "4",
             function(v) _txtScale = math.max(1, tonumber(v:match("%d+")) or 4) end)
-        local _, txtOffBox   = makeInput(cosmeticsPage, "Height offset (studs)", "3",
+        local _d5, txtOffBox   = makeInput(cosmeticsPage, "Height offset (studs)", "3",
             function(v) _txtOffsetY = tonumber(v:match("[%-]?%d+")) or 3 end)
         txtScaleBox.Text = "4"; txtOffBox.Text = "3"
 
@@ -20538,9 +20546,11 @@ do
             local col = 0
             for ci = 1, #text do
                 local ch = text:sub(ci,ci)
-                if ch == " " then col = col + 3; continue end
+                if ch == " " then
+                    col = col + 3
+                else
                 local glyph = txttable[ch]
-                if not glyph then col = col + 1; continue end
+                if glyph then
                 col = col + 1  -- gap before letter
                 for gi, glRow in ipairs(glyph) do
                     local c = col + gi - 1
@@ -20549,6 +20559,10 @@ do
                     end
                 end
                 col = col + #glyph
+                else
+                    col = col + 1
+                end
+                end -- ch == " "
             end
             return pixels, col  -- also return total width in cells
         end
@@ -20625,12 +20639,13 @@ do
                         local ly = baseY + (px.row - 1) * s
                         local off = yawCF * Vector3.new(lx, ly, baseZ)
                         local p   = _txtParts[i]
-                        if not p or not p.Parent then continue end
+                        if p and p.Parent then
                         pcall(function()
                             p.AssemblyLinearVelocity  = Vector3.zero
                             p.AssemblyAngularVelocity = Vector3.zero
                             p.CFrame = CFrame.new(h.Position + off)
                         end)
+                        end -- p valid
                     end
                 end)
             else
@@ -20682,9 +20697,9 @@ do
     local _, throwSrcSetValues = makeDropdown(attacksPage,
         "Throw Source", {"My Folder","Workspace Unanchored"}, "My Folder",
         function(v) _throwSource = v end)
-    local _, throwCntBox = makeInput(attacksPage, "Bricks to throw",  "5",  function(v) _throwCount = tonumber(v:match("%d+")) or 5 end)
-    local _, throwSpdBox = makeInput(attacksPage, "Speed (studs/s)", "80", function(v) _throwSpeed = tonumber(v:match("%d+")) or 80 end)
-    local _, throwDstBox = makeInput(attacksPage, "Max travel distance", "200", function(v) _throwDist = tonumber(v:match("%d+")) or 200 end)
+    local _d2, throwCntBox = makeInput(attacksPage, "Bricks to throw",  "5",  function(v) _throwCount = tonumber(v:match("%d+")) or 5 end)
+    local _d3, throwSpdBox = makeInput(attacksPage, "Speed (studs/s)", "80", function(v) _throwSpeed = tonumber(v:match("%d+")) or 80 end)
+    local _d4, throwDstBox = makeInput(attacksPage, "Max travel distance", "200", function(v) _throwDist = tonumber(v:match("%d+")) or 200 end)
     throwCntBox.Text="5"; throwSpdBox.Text="80"; throwDstBox.Text="200"
     makeToggle(attacksPage, "Gravity-less projectile (keep ownership)", function(on) _throwGravless=on end, false,
         "Bricks travel in a straight line and keep ownership throughout flight.")
@@ -20736,7 +20751,7 @@ do
 
         for i = 1, count do
             local b = pool[i]
-            if not b or not b.Parent then continue end
+            if b and b.Parent then
 
             -- Phantom: disable collisions locally
             local origCanCollide = b.CanCollide
@@ -20848,6 +20863,7 @@ do
                     end
                 end)
             end)
+            end -- b valid
         end
 
         local modeStr = _throwBurst and "burst" or "spread"
@@ -20868,14 +20884,14 @@ do
     local _, laserSrcSetValues = makeDropdown(attacksPage,
         "Laser Source", {"My Folder","Workspace Unanchored"}, "My Folder",
         function(v) _laserSource = v end)
-    local _, laserLenBox = makeInput(attacksPage, "Beam length (studs)", "30",
+    local _d2, laserLenBox = makeInput(attacksPage, "Beam length (studs)", "30",
         function(v) _laserLen = tonumber(v:match("%d+")) or 30 end)
     laserLenBox.Text = "30"
 
     local laserStatusLbl = makeLabel(attacksPage, "Laser: inactive")
     laserStatusLbl.TextColor3 = Color3.fromRGB(140,140,140)
 
-    local _,_,setLaserToggle = makeToggle(attacksPage, "Toggle Laser", function(on)
+    local _d3,_,setLaserToggle = makeToggle(attacksPage, "Toggle Laser", function(on)
         if on then
             if _laserActive then return end
             local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
@@ -20944,19 +20960,19 @@ do
     local _tpReturnOnDeath = false
     local _tpTargetName = ""
 
-    local _, tpSrcSetValues  = makeDropdown(attacksPage,
+    local _d4, tpSrcSetValues  = makeDropdown(attacksPage,
         "Parts Source", {"My Folder","Workspace Unanchored"}, "My Folder",
         function(v) _tpSource = v end)
 
     local tpTargetOptions = {"Others"}
-    local _, tpTargetSetValues = makeDropdown(attacksPage,
+    local _d5, tpTargetSetValues = makeDropdown(attacksPage,
         "Target", tpTargetOptions, "Others",
         function(v) _tpTargetName = v end)
 
-    local _, tpFlingBox  = makeInput(attacksPage, "Fling strength", "120",  function(v) _tpFlingStr = tonumber(v:match("%d+")) or 120 end)
-    local _, tpCountBox  = makeInput(attacksPage, "Parts per player", "3",  function(v) _tpBricksPerPlayer = tonumber(v:match("%d+")) or 3 end)
-    local _, tpRadBox    = makeInput(attacksPage, "Parts radius (studs)", "60", function(v) _tpRadius = tonumber(v:match("%d+")) or 60 end)
-    local _, tpDistBox   = makeInput(attacksPage, "Fling distance (studs)", "30", function(v) _tpFlingDist = tonumber(v:match("%d+")) or 30 end)
+    local _d6, tpFlingBox  = makeInput(attacksPage, "Fling strength", "120",  function(v) _tpFlingStr = tonumber(v:match("%d+")) or 120 end)
+    local _d7, tpCountBox  = makeInput(attacksPage, "Parts per player", "3",  function(v) _tpBricksPerPlayer = tonumber(v:match("%d+")) or 3 end)
+    local _d8, tpRadBox    = makeInput(attacksPage, "Parts radius (studs)", "60", function(v) _tpRadius = tonumber(v:match("%d+")) or 60 end)
+    local _d9, tpDistBox   = makeInput(attacksPage, "Fling distance (studs)", "30", function(v) _tpFlingDist = tonumber(v:match("%d+")) or 30 end)
     tpFlingBox.Text="120"; tpCountBox.Text="3"; tpRadBox.Text="60"; tpDistBox.Text="30"
     makeToggle(attacksPage, "Return to player when target HP reaches 0", function(on) _tpReturnOnDeath=on end, false,
         "Sends bricks back to you when the target dies.")
@@ -20964,7 +20980,7 @@ do
     local _tpUnanchorActive = false
     local _tpUnanchorConn   = nil
 
-    local _,_,setTpUnanchorToggle = makeToggle(attacksPage, "Teleport Unanchored to Target", function(on)
+    local _d10,_,setTpUnanchorToggle = makeToggle(attacksPage, "Teleport Unanchored to Target", function(on)
         _tpUnanchorActive = on
         if on then
             _tpUnanchorConn = RunService.Heartbeat:Connect(function()
@@ -21002,12 +21018,12 @@ do
                 _ringBumpOwnership()
 
                 for _, target in ipairs(targets) do
-                    if not target.Character then continue end
+                    if target.Character then
                     local tHRP = target.Character:FindFirstChild("HumanoidRootPart")
-                    if not tHRP then continue end
+                    if tHRP then
                     for j = 1, math.min(_tpBricksPerPlayer, #pool) do
                         local b = pool[j]
-                        if not b or not b.Parent then continue end
+                        if b and b.Parent then
                         local offset = Vector3.new(
                             math.random(-3,3), math.random(-1,3), math.random(-3,3))
                         pcall(function()
@@ -21020,7 +21036,9 @@ do
                         pcall(function()
                             b.AssemblyLinearVelocity = flingDir * _tpFlingStr
                         end)
+                        end -- b valid
                     end
+                    end end -- tHRP / target.Character
                 end
             end)
         else
@@ -21110,8 +21128,8 @@ do
     local _, cloneHostSetValues = makeDropdown(cloneCtrlPage,
         "Orbit host", {"Myself"}, "Myself",
         function(v) _cloneHostName = v end)
-    local _, cloneSpdBox = makeInput(cloneCtrlPage, "Orbit speed",  "1.5", function(v) _cloneSpeed  = tonumber(v:match("[%d%.]+")) or 1.5 end)
-    local _, cloneRadBox = makeInput(cloneCtrlPage, "Orbit radius", "8",   function(v) _cloneRadius = tonumber(v:match("[%d%.]+")) or 8   end)
+    local _d2, cloneSpdBox = makeInput(cloneCtrlPage, "Orbit speed",  "1.5", function(v) _cloneSpeed  = tonumber(v:match("[%d%.]+")) or 1.5 end)
+    local _d3, cloneRadBox = makeInput(cloneCtrlPage, "Orbit radius", "8",   function(v) _cloneRadius = tonumber(v:match("[%d%.]+")) or 8   end)
     cloneSpdBox.Text="1.5"; cloneRadBox.Text="8"
     makeToggle(cloneCtrlPage, "Follow host angle", function(on) _cloneFollow=on end, false,
         "Clone ring rotates with the host's yaw.")
@@ -21121,7 +21139,7 @@ do
     local cloneStatusLbl = makeLabel(cloneCtrlPage, "Clone ring: inactive")
     cloneStatusLbl.TextColor3 = Color3.fromRGB(140,140,140)
 
-    local _,_,setCloneToggle = makeToggle(cloneCtrlPage, "Toggle Clone Ring", function(on)
+    local _d4,_,setCloneToggle = makeToggle(cloneCtrlPage, "Toggle Clone Ring", function(on)
         if on then
             if _cloneActive then return end
             _cloneHRPs = _getCloneHRPs()
@@ -21153,7 +21171,7 @@ do
                     yaw = CFrame.Angles(0, math.atan2(-look.X,-look.Z), 0)
                 end
                 for i, ch in ipairs(_cloneHRPs) do
-                    if not ch or not ch.Parent then continue end
+                    if ch and ch.Parent then
                     local a   = _cloneAngle + (i-1)*(2*math.pi/n)
                     local off = yaw * Vector3.new(math.cos(a)*_cloneRadius, 0, math.sin(a)*_cloneRadius)
                     local targetPos = hrp.Position + off
@@ -21175,6 +21193,7 @@ do
                         ch.AssemblyAngularVelocity = Vector3.zero
                         ch.CFrame = aimCF
                     end)
+                    end -- ch valid
                 end
             end)
         else
@@ -21195,7 +21214,7 @@ do
     local _cloneThrowSpeed = 80
     local _cloneThrowDist  = 150
     local _, ctSpdBox = makeInput(cloneCtrlPage, "Throw speed", "80",  function(v) _cloneThrowSpeed=tonumber(v:match("%d+")) or 80  end)
-    local _, ctDstBox = makeInput(cloneCtrlPage, "Max distance","150", function(v) _cloneThrowDist =tonumber(v:match("%d+")) or 150 end)
+    local _d2, ctDstBox = makeInput(cloneCtrlPage, "Max distance","150", function(v) _cloneThrowDist =tonumber(v:match("%d+")) or 150 end)
     ctSpdBox.Text="80"; ctDstBox.Text="150"
 
     makeButton(cloneCtrlPage, "Throw Clones", function()
@@ -23081,4 +23100,4 @@ end
 -- ── AUTO-LOAD SETTINGS ON EXECUTE ───────────────────────────
 task.defer(sigmaLoadSettings)
 
-end)() -- ╚═ BUILD SYSTEM INTERNALS ══╝
+end -- ╚═ BUILD SYSTEM INTERNALS ══╝
