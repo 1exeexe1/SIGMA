@@ -515,6 +515,31 @@ local HttpService       = game:GetService("HttpService")
 local lp = Players.LocalPlayer
 math.randomseed(os.clock() * 1000)
 
+-- ── Permanent session-wide network ownership ──────────────────
+-- Set SimulationRadius to a huge value ONCE at startup and keep it there.
+-- Every tool (rings, De-grid, throws, cosmetics, RAD) writes part CFrames
+-- locally; the server only replicates those writes when the client owns the
+-- physics. Previous code restored SimRadius to 500 after each operation,
+-- which created ownership gaps between back-to-back tool calls and made
+-- rings appear local-only. Keeping it permanently high eliminates all gaps.
+-- A Heartbeat re-asserts it every 2 s in case the engine or game code resets it.
+local _SIM_HIGH = 2^24  -- 16,777,216 studs; server sees all client physics
+local function _bumpSimRadius()
+    pcall(function()
+        if typeof(sethiddenproperty) == "function" then
+            sethiddenproperty(lp, "SimulationRadius", _SIM_HIGH)
+        end
+    end)
+end
+_bumpSimRadius()  -- claim immediately
+do
+    local _simT = 0
+    game:GetService("RunService").Heartbeat:Connect(function(dt)
+        _simT = _simT + dt
+        if _simT >= 2 then _simT = 0; _bumpSimRadius() end
+    end)
+end
+
 -- notify forward-declared; real body is assigned after the toast do-block below.
 local notify
 
@@ -779,11 +804,18 @@ local function _attachMoveHandles()
     h.Parent  = workspace
     S._previewHandles = h
 
-    -- MouseDrag: translate every preview part + the anchor by the drag delta
+    -- MouseDrag: translate every preview part + the anchor by the drag delta.
+    -- Roblox Handles.MouseDrag gives the TOTAL distance dragged since mouse-down,
+    -- not the per-frame delta. Track lastDist per face to recover the real delta.
+    local _hdLastDist = {}
+    h.MouseButton1Down:Connect(function() _hdLastDist = {} end)
     h.MouseDrag:Connect(function(face, distance)
         if not S.movePreview or not S.livePreview then return end
+        local prev  = _hdLastDist[face] or 0
+        local dDist = distance - prev
+        _hdLastDist[face] = distance
         local faceVec = CT_NORM_VEC[face] or Vector3.new(0,0,0)
-        local delta   = faceVec * distance
+        local delta   = faceVec * dDist
 
         -- Move anchor
         if S._previewAnchor and S._previewAnchor.Parent then
@@ -2597,11 +2629,11 @@ local creditsPage_ref  = _settingsSubs["Credits"]  -- creditsPage do-block alias
 
 -- ── BIG TAB 8: Part Controller ───────────────────────────────
 local _partCtrlBigPage = createTab("Part Ctrl", 8)
-local _partCtrlSubs    = makeSubTabBar(_partCtrlBigPage, {"Rings", "Cosmetics", "Attacks", "Clone Ctrl"})
+local _partCtrlSubs    = makeSubTabBar(_partCtrlBigPage, {"Rings", "Cosmetics", "Attacks"})
 local partCtrlPage     = _partCtrlSubs["Rings"]
 local cosmeticsPage    = _partCtrlSubs["Cosmetics"]
 local attacksPage      = _partCtrlSubs["Attacks"]
-local cloneCtrlPage    = _partCtrlSubs["Clone Ctrl"]
+local cloneCtrlPage    = cosmeticsPage  -- clone controls merged into cosmetics (see below)
 
 -- ── TAB: MAIN ────────────────────────────────────────────────
 
@@ -4043,10 +4075,23 @@ do
             setCharHighlight(char,"ESP_Admin", false, nil, true)
         end
 
-        -- Invisible outline: white AlwaysOnTop so the outline persists through transparency
+        -- Invisible ghost: filled Highlight so body silhouette shows through transparency.
+        -- FillTransparency=0.55 gives a translucent "ghost" look; AlwaysOnTop renders
+        -- through fully-transparent parts so the outline is always visible.
         if S.espInvisible then
-            local inv=isCharInvisible(char)
-            setCharHighlight(char,"ESP_Invisible", inv, Color3.fromRGB(255,255,255), true)
+            local inv = isCharInvisible(char)
+            local old = char:FindFirstChild("ESP_Invisible")
+            if old then old:Destroy() end
+            if inv then
+                local h = Instance.new("Highlight")
+                h.Name              = "ESP_Invisible"
+                h.FillTransparency  = 0.55
+                h.FillColor         = Color3.fromRGB(190, 225, 255)  -- pale ghost-blue
+                h.OutlineColor      = Color3.fromRGB(160, 210, 255)
+                h.OutlineTransparency = 0
+                h.DepthMode         = Enum.HighlightDepthMode.AlwaysOnTop
+                h.Parent            = char
+            end
         else
             setCharHighlight(char,"ESP_Invisible", false, nil, true)
         end
@@ -4859,7 +4904,7 @@ local E = {
 }
 
 if _hasSetHidden then
-    pcall(function() sethiddenproperty(lp,"SimulationRadius",500) end)
+    -- (SimulationRadius is managed session-wide by _bumpSimRadius; no reset here)
 end
 
 -- ── SelectionBox ──────────────────────────────────────────────
@@ -5091,12 +5136,7 @@ local function applyOffsetOnly()
     pcall(function() newBrick.CFrame = finalCF end)
     task.wait(0.06)
 
-    -- Restore SimulationRadius to normal
-    pcall(function()
-        if typeof(sethiddenproperty) == "function" then
-            sethiddenproperty(lp, "SimulationRadius", 500)
-        end
-    end)
+    -- (SimulationRadius stays high session-wide; no restore needed)
 
     -- ── Auto-select the new off-grid brick ────────────────────────
     -- Clear previous state then immediately lock onto the new brick so
@@ -5151,10 +5191,7 @@ local function applyAnchor()
         HANDSHAKE, Color3.new(1,1,1), "anchor", "")
     task.wait(0.08)
 
-    -- NOW restore -- remote has been sent, race window closed
-    if _hasSetHidden then
-        pcall(function() sethiddenproperty(lp, "SimulationRadius", 500) end)
-    end
+    -- (SimulationRadius stays high session-wide; no restore needed after FireServer)
 
     -- Restore local CanCollide so the anchored brick is solid.
     if E.collideOff then
@@ -6514,15 +6551,23 @@ local function blitzBuild(ev, positions, bsize, probe)
     end
     if #unique == 0 then return end
 
-    -- Aura fire: blast every position in the cluster with zero delay.
-    -- Pre-filter with hasBlockAt so we never re-fire at an already-placed brick
-    -- (server silently drops duplicates but they still consume remote budget and
-    -- can trigger server-side rate-limit backpressure, slowing the whole build).
-    for _, pos in ipairs(unique) do
+    -- Snake sort: Y asc → X asc → Z asc (layer by layer, row by row).
+    -- Consecutive fires are always adjacent bricks, maximising spatial
+    -- locality and keeping the server geometry state warm per burst.
+    table.sort(unique, function(a, b)
+        if a.Y ~= b.Y then return a.Y < b.Y end
+        if a.X ~= b.X then return a.X < b.X end
+        return a.Z < b.Z
+    end)
+
+    -- Fire in bursts of 12 with a brief yield (~12-15 bricks/sec).
+    -- Pre-filter with hasBlockAt to skip already-placed bricks.
+    for i, pos in ipairs(unique) do
         if S.buildStopped then return end
         if not hasBlockAt(pos, probeBox) then
             ev:FireServer(Workspace.Terrain, Enum.NormalId.Top, pos, arg)
         end
+        if i % 12 == 0 then task.wait(0.07) end
     end
 end
 
@@ -6595,14 +6640,15 @@ local function blitzBuildChaos(ev, positions, bsize, probe)
             blitzBuild(ev, targets, arg, probeBox)
             isRepass = true
         else
-            -- Wave 2+: chaos shuffle then full-speed aura fire (holes are sparse)
+            -- Wave 2+: chaos shuffle then burst fire (holes are sparse, locality gone)
             for i = #targets, 2, -1 do
                 local j = math.random(1, i)
                 targets[i], targets[j] = targets[j], targets[i]
             end
-            for _, pos in ipairs(targets) do
+            for i, pos in ipairs(targets) do
                 if S.buildStopped then return end
                 ev:FireServer(Workspace.Terrain, Enum.NormalId.Top, pos, arg)
+                if i % 12 == 0 then task.wait(0.07) end
             end
         end
 
@@ -8025,6 +8071,46 @@ do
         _setMovePreview(on)
     end, false)
 
+    -- ── Per-brick typed load preview (hoisted to outer scope so _loadPreviewRefresh can call it)
+    -- Weak-value table: GC collects preview parts if build coroutine dies unexpectedly.
+    local _activeLoadPreviews = setmetatable({}, {__mode = "v"})
+    local function cleanupLoadPreviews()
+        for _, p in pairs(_activeLoadPreviews) do
+            pcall(function() if p and p.Parent then p:Destroy() end end)
+        end
+    end
+    local _PREVIEW_COLOR = {
+        normal   = Color3.fromRGB(0,   220, 80),
+        shaped   = Color3.fromRGB(0,   140, 255),
+        detailed = Color3.fromRGB(255, 220, 0),
+    }
+    local function makeLoadPreview(metas)
+        cleanupLoadPreviews()
+        _activeLoadPreviews = setmetatable({}, {__mode = "v"})
+        if #metas == 0 then return {} end
+        local parts = {}
+        local batch = 0
+        for _, m in ipairs(metas) do
+            local sz = m.targetSize or Vector3.new(4, 4, 4)
+            local ap = Instance.new("Part")
+            ap.Size = sz; ap.CFrame = CFrame.new(m.rawCenter)
+            ap.Transparency = 1; ap.Anchored = true
+            ap.CanCollide = false; ap.CastShadow = false
+            ap.Parent = Workspace
+            local col = _PREVIEW_COLOR[m.brickType] or _PREVIEW_COLOR.normal
+            local sb = Instance.new("SelectionBox")
+            sb.Adornee = ap; sb.Color3 = col
+            sb.LineThickness = 0.04; sb.SurfaceTransparency = 1
+            sb.SurfaceColor3 = col; sb.Parent = Workspace
+            table.insert(parts, ap); table.insert(parts, sb)
+            _activeLoadPreviews[#_activeLoadPreviews+1] = ap
+            _activeLoadPreviews[#_activeLoadPreviews+1] = sb
+            batch = batch + 1
+            if batch >= 50 then batch = 0; task.wait(0) end
+        end
+        return parts
+    end
+
     makeButton(g,"Load Build",function(btn)
         if S.saveName == "" or S.saveName == "(no saves)" then btn.Text="Select save!"; return end
         local path = "SigmaPanel_Builds/"..S.saveName..".json"
@@ -8272,78 +8358,6 @@ do
             -- different calls. math.floor(x+0.5) is always round-half-up.
             local function posKey(p)
                 return math.floor(p.X+0.5)..","..math.floor(p.Y+0.5)..","..math.floor(p.Z+0.5)
-            end
-
-            -- ── Preview: cyan neon wireframe bounding box ────────────
-            -- Weak-value table: if the load coroutine dies mid-way, Lua GC
-            -- can still collect the preview parts instead of leaking them.
-            local _activeLoadPreviews = setmetatable({}, {__mode = "v"})
-            local function cleanupLoadPreviews()
-                for _, p in pairs(_activeLoadPreviews) do
-                    pcall(function() if p and p.Parent then p:Destroy() end end)
-                end
-            end
-
-            -- ── Per-brick typed preview ──────────────────────────────────
-            -- Replaces the old single bounding-box wireframe.
-            -- Each brick gets an invisible anchor Part + a SelectionBox outline
-            -- colour-coded by brick type:
-            --   Normal   (4×4×4 on-grid) → green   (0, 220, 80)
-            --   Shaped   (resized/off-grid) → blue  (0, 140, 255)
-            --   Detailed (1×1×1)          → yellow (255, 220, 0)
-            --
-            -- Parts are batched in groups of 50 with a task.wait(0) between
-            -- batches so large saves don't freeze the client during preview init.
-            -- All parts are tracked in _activeLoadPreviews (weak-value) so the
-            -- GC can collect them if the coroutine dies unexpectedly.
-            local PREVIEW_COLOR = {
-                normal   = Color3.fromRGB(0,   220, 80),
-                shaped   = Color3.fromRGB(0,   140, 255),
-                detailed = Color3.fromRGB(255, 220, 0),
-            }
-            local function makeLoadPreview(metas)
-                cleanupLoadPreviews()   -- destroy any leftover from a previous aborted load
-                _activeLoadPreviews = setmetatable({}, {__mode = "v"})
-                if #metas == 0 then return {} end
-
-                local parts = {}
-                local batch = 0
-                for _, m in ipairs(metas) do
-                    -- Anchor Part: invisible, exact brick size and position.
-                    -- SelectionBox requires an Adornee that is a BasePart or Model.
-                    local sz  = m.targetSize or Vector3.new(4, 4, 4)
-                    local ap  = Instance.new("Part")
-                    ap.Size        = sz
-                    ap.CFrame      = CFrame.new(m.rawCenter)
-                    ap.Transparency = 1
-                    ap.Anchored    = true
-                    ap.CanCollide  = false
-                    ap.CastShadow  = false
-                    ap.Parent      = Workspace
-
-                    -- SelectionBox: coloured outline around the anchor part.
-                    local col = PREVIEW_COLOR[m.brickType] or PREVIEW_COLOR.normal
-                    local sb  = Instance.new("SelectionBox")
-                    sb.Adornee        = ap
-                    sb.Color3         = col
-                    sb.LineThickness  = 0.04
-                    sb.SurfaceTransparency = 1        -- no face fill, outline only
-                    sb.SurfaceColor3  = col
-                    sb.Parent         = Workspace
-
-                    table.insert(parts, ap)
-                    table.insert(parts, sb)
-                    _activeLoadPreviews[#_activeLoadPreviews+1] = ap
-                    _activeLoadPreviews[#_activeLoadPreviews+1] = sb
-
-                    -- Yield every 50 bricks to keep the client responsive
-                    batch = batch + 1
-                    if batch >= 50 then
-                        batch = 0
-                        task.wait(0)
-                    end
-                end
-                return parts
             end
 
             -- ── Cluster blitz  -  mirrors buildChunked EXACTLY ─────────
@@ -14086,15 +14100,7 @@ local function pinBrick(brick)
     bg.CFrame    = brick.CFrame
     bg.Parent    = brick
     RAD.pinBG    = bg
-    pcall(function()
-        if typeof(sethiddenproperty) == "function" then
-            sethiddenproperty(lp, "SimulationRadius", 500)
-        end
-    end)
-end
-
--- Remove BodyPosition/BodyGyro pin and release local anchor from the brick.
-local function unpinBrick(brick)
+    -- (SimulationRadius stays high session-wide)
     if RAD.pinBP then
         local b = RAD.pinBP.Parent   -- recover brick ref from the BodyPosition
         pcall(function() RAD.pinBP:Destroy() end); RAD.pinBP = nil
@@ -14536,12 +14542,7 @@ makeButton(g3, "Brick \226\134\146 Core", function(btn)
             task.wait(0.15)
         end
 
-        pcall(function()
-            if typeof(sethiddenproperty) == "function" then
-                sethiddenproperty(lp, "SimulationRadius", 500)
-            end
-        end)
-
+        -- (SimulationRadius stays high session-wide)
         RAD.coreBrick   = currentBrick
         S.radCoreBrick  = currentBrick
 
@@ -19277,27 +19278,21 @@ local _ringHostName    = "Myself"
 local _ringOwnTimer    = 0
 
 -- ── Network-ownership helpers ─────────────────────────────────
-local _prevSimRadius = nil
+local _prevSimRadius = nil  -- kept for legacy compat; no longer used for restore
 local function _ringBumpOwnership()
+    -- Re-assert the session-wide high SimulationRadius (same as _bumpSimRadius but
+    -- called from ring-internal code that may be deep in the rings do-block).
     pcall(function()
         if typeof(sethiddenproperty) == "function" then
-            if not _prevSimRadius then
-                local ok, v = pcall(function()
-                    return game:GetService("Players").LocalPlayer.SimulationRadius
-                end)
-                _prevSimRadius = ok and v or 1000
-            end
-            sethiddenproperty(lp, "SimulationRadius", 2^24)
+            sethiddenproperty(lp, "SimulationRadius", _SIM_HIGH)
         end
     end)
 end
 local function _ringRestoreOwnership()
-    pcall(function()
-        if typeof(sethiddenproperty) == "function" and _prevSimRadius then
-            sethiddenproperty(lp, "SimulationRadius", _prevSimRadius)
-            _prevSimRadius = nil
-        end
-    end)
+    -- Previously restored SimRadius to the pre-ring value, causing ownership gaps
+    -- for every other concurrent tool. Now a deliberate no-op: the session-wide
+    -- Heartbeat at script start keeps SimRadius perpetually high.
+    _prevSimRadius = nil
 end
 
 -- ── Resolve host HRP ─────────────────────────────────────────
@@ -19312,15 +19307,39 @@ local function _ringGetHostHRP(hostName)
 end
 
 -- ── Brick source resolver ─────────────────────────────────────
+-- ── Grab Mode: controls what _ringGetSourceBricks accepts ─────────────────
+-- "Bricks"  → only BaseParts named "Brick" (or "brick")
+-- "Clones"  → only HumanoidRootParts that are not real player characters
+-- "Both"    → no name restriction (original behaviour)
+local _grabMode = "Bricks"
+
 -- "Workspace Unanchored" is limited to parts named "Brick" or "brick"
 -- to avoid grabbing characters, humanoid parts, etc.
 local function _ringGetSourceBricks(sourceName, excludeSet)
     local results = {}
     pcall(function()
+        -- Real player HRPs (never grabbed regardless of mode)
+        local realHRPs = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Character then
+                local h = p.Character:FindFirstChild("HumanoidRootPart")
+                if h then realHRPs[h] = true end
+            end
+        end
+        local function nameOk(b)
+            if _grabMode == "Bricks" then
+                return b.Name:lower() == "brick"
+            elseif _grabMode == "Clones" then
+                return b.Name == "HumanoidRootPart" and not realHRPs[b]
+            end
+            return true  -- "Both"
+        end
         local function ok(b)
             if not b:IsA("BasePart") then return false end
             if b.Anchored then return false end
+            if realHRPs[b] then return false end
             if excludeSet and excludeSet[b] then return false end
+            if not nameOk(b) then return false end
             return true
         end
         if sourceName == "My Folder" then
@@ -19331,19 +19350,8 @@ local function _ringGetSourceBricks(sourceName, excludeSet)
                 end
             end
         elseif sourceName == "Workspace Unanchored" then
-            -- Accept any unanchored BasePart that isn't a character part
-            local charParts = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p.Character then
-                    for _, d in ipairs(p.Character:GetDescendants()) do
-                        charParts[d] = true
-                    end
-                end
-            end
             for _, b in ipairs(Workspace:GetDescendants()) do
-                if ok(b) and not charParts[b] then
-                    results[#results+1] = b
-                end
+                if ok(b) then results[#results+1] = b end
             end
         else
             -- Named player's brick folder
@@ -19557,7 +19565,7 @@ local FACE_CORRECTIONS = {
 }
 
 -- ── Core tick: move one ring's bricks one frame ───────────────
-local HEAL_INTERVAL = 0.5
+local HEAL_INTERVAL = 0.25  -- halved: catches disappearing 1×1×1 bricks faster
 do -- ╔═ RINGS SCOPE ══╗
 
 local function _ringTickInstance(dt, params, state)
@@ -19627,11 +19635,11 @@ local function _ringTickInstance(dt, params, state)
         end
     end
 
-    local tiltCF = CFrame.Angles(
+    local tiltCF = (params.restrictAngle ~= false) and CFrame.Angles(
         math.rad(params.angleX),
         math.rad(params.angleY),
         math.rad(params.angleZ)
-    )
+    ) or CFrame.new()
 
     local basePos = hrp.Position
 
@@ -19688,18 +19696,19 @@ local function _ringStartLoop()
     _ringConn = RunService.Heartbeat:Connect(function(dt)
         if not _ringActive then return end
         _ringTickInstance(dt, {
-            speed       = _ringSpeed,
-            radius      = _ringRadius,
-            length      = _ringLength,
-            pattern     = _ringPattern,
-            angleX      = _ringAngleX,
-            angleY      = _ringAngleY,
-            angleZ      = _ringAngleZ,
-            aimOn       = _ringAimOn,
-            aimFace     = _ringAimFace,
-            followAngle = _ringFollowAngle,
-            hostName    = _ringHostName,
-            sourceName  = _ringBrickSource,
+            speed         = _ringSpeed,
+            radius        = _ringRadius,
+            length        = _ringLength,
+            pattern       = _ringPattern,
+            angleX        = _ringAngleX,
+            angleY        = _ringAngleY,
+            angleZ        = _ringAngleZ,
+            aimOn         = _ringAimOn,
+            aimFace       = _ringAimFace,
+            followAngle   = _ringFollowAngle,
+            restrictAngle = _ringRestrictAngle,
+            hostName      = _ringHostName,
+            sourceName    = _ringBrickSource,
         }, editorState)
         _ringAngle = editorState.angle
     end)
@@ -19753,7 +19762,11 @@ local function _multiRingStop(name)
     if inst.conn then inst.conn:Disconnect(); inst.conn = nil end
     for _, p in ipairs(inst.parts) do
         pcall(function()
-            if p and p.Parent then p.Anchored = inst.partsWereAnchored[p] or false end
+            if p and p.Parent then
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+                p.Anchored = inst.partsWereAnchored[p] or false
+            end
         end)
     end
     _activeRings[name] = nil
@@ -19802,6 +19815,11 @@ makeSection(gR, "── Brick Source ──────────────�
 local _srcDdRow, _srcDdSetValues = makeDropdown(gR,
     "Target Folder (brick source)", _buildSourceList(), "My Folder",
     function(v) _ringBrickSource = v end)
+
+makeDropdown(gR, "Grab", {"Bricks", "Clones", "Both"}, "Bricks", function(v)
+    _grabMode = v
+end)
+makeSection(gR, "Bricks=parts named 'Brick' | Clones=workspace clone HRPs | Both=no filter")
 
 -- ── Multi-ring Management ─────────────────────────────────────
 makeSection(gR, "── Multi-Ring Management ───────────────────────")
@@ -20039,8 +20057,15 @@ for _, p in ipairs(Players:GetPlayers()) do
     if p ~= lp then aimTargetOpts[#aimTargetOpts+1] = p.Name.." / "..p.DisplayName end
 end
 
-makeToggle(gR, "Aim bricks at", function(on) _ringAimOn=on; if not on then _ringAimFace="None" end end,
-    false, "Orient selected face of each brick toward the chosen aim target.")
+local _ringRestrictAngle = true   -- default ON: bricks follow desired angle (old behaviour)
+local _setRestrictAngle  = nil    -- setter reference filled below
+
+makeToggle(gR, "Aim bricks at", function(on)
+    _ringAimOn = on
+    if not on then _ringAimFace = "None" end
+    -- Aim bricks at requires free rotation → force Restrict Angle off
+    if on and _setRestrictAngle then _setRestrictAngle(false) end
+end, false, "Orient selected face of each brick toward the chosen aim target.")
 _, _ringAimTargetSetValues = makeDropdown(gR, "Aim target", aimTargetOpts, "Host",
     function(v) _ringAimTarget = v end)
 makeDropdown(gR, "Aim face", {"None","Front","Back","Left","Right","Top","Bottom"}, "None",
@@ -20049,6 +20074,10 @@ makeDropdown(gR, "Aim face", {"None","Front","Back","Left","Right","Top","Bottom
 makeSection(gR, "── Rotation ─────────────────────────────────────")
 makeToggle(gR, "Follow Player's Angle", function(on) _ringFollowAngle=on end, false,
     "Ring rotates with the host's yaw -- useful for wings, staffs, swords.")
+local _,_,_sra = makeToggle(gR, "Restrict Angle", function(on)
+    _ringRestrictAngle = on
+end, true, "ON (default): bricks are locked to the configured X/Y/Z angles. OFF: bricks spin freely without any angle constraint.")
+_setRestrictAngle = _sra
 
 -- ── Save preset ───────────────────────────────────────────────
 makeSection(gR, "── Save Preset ──────────────────────────────────")
@@ -20098,7 +20127,12 @@ local function _ringStop()
     if _ringConn then _ringConn:Disconnect(); _ringConn = nil end
     for _, p in ipairs(_ringParts) do
         pcall(function()
-            if p and p.Parent then p.Anchored = _ringPartsWereAnchored[p] or false end
+            if p and p.Parent then
+                -- Zero out all momentum first so physics starts fresh (no fling)
+                p.AssemblyLinearVelocity  = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+                p.Anchored = _ringPartsWereAnchored[p] or false
+            end
         end)
     end
     _ringRestoreOwnership()
@@ -20148,10 +20182,18 @@ makeButton(gR, "Respawn Ring (apply new params)", function()
     end)
 end)
 
--- ── Live player-list refresh (source & host dropdowns) ────────
+-- ── Live player-list refresh (source, host, and aim-target dropdowns) ────
 local function _refreshDropdowns()
-    if _srcDdSetValues then _srcDdSetValues(_buildSourceList(), _ringBrickSource) end
+    if _srcDdSetValues  then _srcDdSetValues(_buildSourceList(), _ringBrickSource) end
     if _hostDdSetValues then _hostDdSetValues(_buildHostList(), _ringHostName) end
+    -- Also rebuild aim-target list so new/leaving players are reflected
+    if _ringAimTargetSetValues then
+        local opts = {"Host", "Camera/myself"}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= lp then opts[#opts+1] = p.Name.." / "..p.DisplayName end
+        end
+        _ringAimTargetSetValues(opts, _ringAimTarget)
+    end
 end
 Players.PlayerAdded:Connect(_refreshDropdowns)
 Players.PlayerRemoving:Connect(function() task.wait(0.1); _refreshDropdowns() end)
@@ -20229,28 +20271,29 @@ do
         end,
         -- ── Sword: held in right hand, pointing forward ────────────
         -- Right hand ≈ (+1.5 X, +1.0 Y, +0.5 Z relative to HRP)
-        ["Sword"] = function(n)
+        -- Offsets are now relative to the right hand's own CFrame so rotation follows the hand.
+        ["Sword"] = function(n, hrp)
             local offsets = {}
-            local spacing = 1.5   -- compact blade
-            -- First brick is the hilt (at hand), rest extend forward
+            local spacing = 1.5
             for i = 1, n do
-                local z = -(i - 0.5) * spacing      -- negative Z = forward in Roblox
-                offsets[#offsets+1] = CFrame.new(1.5, 1.0, 0.5 + z)
-                    * CFrame.Angles(0, 0, math.rad(-10))  -- slight forward tilt
+                local z = -(i - 0.5) * spacing
+                offsets[#offsets+1] = CFrame.new(0, 0, z)
+                    * CFrame.Angles(0, 0, math.rad(-10))
             end
-            return offsets
+            return offsets, "RightHand"
         end,
         -- ── Staff: held in left hand, rising vertically ────────────
         -- Left hand ≈ (-1.5 X, +1.0 Y, +0.5 Z)
-        ["Staff"] = function(n)
+        -- Offsets are relative to the left hand's own CFrame.
+        ["Staff"] = function(n, hrp)
             local offsets = {}
             local spacing = 1.4
             for i = 1, n do
-                local y = (i - 1) * spacing          -- rises upward from grip
-                offsets[#offsets+1] = CFrame.new(-1.5, 1.0 + y, 0.5)
-                    * CFrame.Angles(math.rad(5), 0, math.rad(8))  -- slight tilt outward
+                local y = (i - 1) * spacing
+                offsets[#offsets+1] = CFrame.new(0, y, 0)
+                    * CFrame.Angles(math.rad(5), 0, math.rad(8))
             end
-            return offsets
+            return offsets, "LeftHand"
         end,
         -- ── Halo: small ring floating just above head ──────────────
         -- Head top ≈ +3.2 Y above HRP. Halo should be ~0.5 above that.
@@ -20367,7 +20410,11 @@ do
         if _cosConn then _cosConn:Disconnect(); _cosConn = nil end
         for _, p in ipairs(_cosParts) do
             pcall(function()
-                if p and p.Parent then p.Anchored = _cosPartsWereAnchored[p] or false end
+                if p and p.Parent then
+                    p.AssemblyLinearVelocity  = Vector3.zero
+                    p.AssemblyAngularVelocity = Vector3.zero
+                    p.Anchored = _cosPartsWereAnchored[p] or false
+                end
             end)
         end
         _cosParts = {}; _cosPartsWereAnchored = {}
@@ -20404,24 +20451,72 @@ do
             local n = #_cosParts
             local fmFn = FORMATIONS[_cosFormation]
             cosStatusLbl.Text = "Status: active O " .. n .. "x " .. _cosFormation
-            _cosConn = RunService.Heartbeat:Connect(function()
+            local _cosOwnTimer  = 0
+            local _cosHealTimer = 0
+            _cosConn = RunService.Heartbeat:Connect(function(dt)
                 if not _cosActive then return end
+                -- Ownership re-assert (mirrors ring behaviour)
+                _cosOwnTimer = _cosOwnTimer + dt
+                if _cosOwnTimer >= 0.5 then
+                    _cosOwnTimer = 0
+                    _ringBumpOwnership()
+                end
+                -- Self-heal: replace missing bricks
+                _cosHealTimer = _cosHealTimer + dt
+                if _cosHealTimer >= HEAL_INTERVAL then
+                    _cosHealTimer = 0
+                    local alive = {}
+                    for _, p in ipairs(_cosParts) do
+                        if p and p.Parent then alive[#alive+1] = p end
+                    end
+                    if #alive < n then
+                        local excl2 = {}
+                        for _, inst in pairs(_activeRings) do
+                            for _, p in ipairs(inst.parts or {}) do excl2[p] = true end
+                        end
+                        for _, p in ipairs(_ringParts) do excl2[p] = true end
+                        for _, p in ipairs(alive) do excl2[p] = true end
+                        local spares = _ringGetSourceBricks(_cosSource, excl2)
+                        for i = 1, math.min(n - #alive, #spares) do
+                            local b = spares[i]
+                            _cosPartsWereAnchored[b] = b.Anchored
+                            alive[#alive+1] = b
+                        end
+                        for k = #_cosParts, 1, -1 do _cosParts[k] = nil end
+                        for _, p in ipairs(alive) do _cosParts[#_cosParts+1] = p end
+                        n = #_cosParts
+                    end
+                end
                 local h = _cosGetHostHRP(_cosHostName)
                 if not h then return end
-                local offsets = fmFn(n)
-                local yaw = CFrame.new()
-                if _cosFollowAngle then
-                    local look = h.CFrame.LookVector
-                    yaw = CFrame.Angles(0, math.atan2(-look.X,-look.Z), 0)
+                local offsets, handPart = fmFn(n)
+                -- For Sword/Staff: base is the actual hand CFrame (follows arm angle)
+                local base
+                if handPart then
+                    local char = h.Parent
+                    local hand = char and char:FindFirstChild(handPart)
+                    base = hand and hand.CFrame or CFrame.new(h.Position)
+                else
+                    local yaw2 = CFrame.new()
+                    if _cosFollowAngle then
+                        local cam = workspace.CurrentCamera
+                        if cam then
+                            local cx, cy, cz = cam.CFrame:ToOrientation()
+                            yaw2 = CFrame.Angles(-cx, cy, cz)
+                        else
+                            local look = h.CFrame.LookVector
+                            yaw2 = CFrame.Angles(0, math.atan2(-look.X,-look.Z), 0)
+                        end
+                    end
+                    base = CFrame.new(h.Position) * yaw2
                 end
-                local base = CFrame.new(h.Position)
                 for i, p in ipairs(_cosParts) do
                     if p and p.Parent then
                         local off = offsets[i] or offsets[#offsets]
                         pcall(function()
                             p.AssemblyLinearVelocity  = Vector3.zero
                             p.AssemblyAngularVelocity = Vector3.zero
-                            p.CFrame = base * yaw * off
+                            p.CFrame = base * off
                         end)
                     end
                 end
@@ -21170,8 +21265,14 @@ do
                 if n == 0 then return end
                 local yaw = CFrame.new()
                 if _cloneFollow then
-                    local look = hrp.CFrame.LookVector
-                    yaw = CFrame.Angles(0, math.atan2(-look.X,-look.Z), 0)
+                    local cam = workspace.CurrentCamera
+                    if cam then
+                        local cx, cy, cz = cam.CFrame:ToOrientation()
+                        yaw = CFrame.Angles(-cx, cy, cz)
+                    else
+                        local look = hrp.CFrame.LookVector
+                        yaw = CFrame.Angles(0, math.atan2(-look.X,-look.Z), 0)
+                    end
                 end
                 for i, ch in ipairs(_cloneHRPs) do
                     if ch and ch.Parent then
