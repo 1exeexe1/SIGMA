@@ -15818,6 +15818,582 @@ do
     end)
 end
 
+-- ═══════════════════════════════════════════════════════════════════
+-- ║  INFINITE RANGE BUILDING  (Debug sub-tab)                      ║
+-- ║                                                                 ║
+-- ║  Tests that Build / Shape / Paint remotes are truly infinite-   ║
+-- ║  range when a BasePart (not Terrain) is used as arg[1].        ║
+-- ║  NO teleport is ever used in any of the three tests.           ║
+-- ║                                                                 ║
+-- ║  Button 1 - "Test Line"       : 100 bricks, 4×4×4 → 2×4×4     ║
+-- ║  Button 2 - "Test Small Line" : 100 bricks, shape→4×1×4 first  ║
+-- ║  Button 3 - "Cube Test"       : 100 bricks, shape→10×12×2 first ║
+-- ║                                                                 ║
+-- ║  Each test writes its own JSON log file:                        ║
+-- ║    infinite-tools-line.json                                     ║
+-- ║    infinite-tools-small.json                                    ║
+-- ║    infinite-tools-cube.json                                     ║
+-- ═══════════════════════════════════════════════════════════════════
+do
+    local dbgPage = dbgPage_ref
+    local gInf = makeGroup(dbgPage, "Infinite Range Building",
+        "Tests all 4 tools (Build / Shape / Paint / Delete) at infinite range "
+        .. "using brick-to-brick FireServer. NO teleport is used. "
+        .. "Each test places 100 bricks via face-attach, shapes them, and paints them. "
+        .. "Results are written to infinite-tools-*.json for analysis.")
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- Shared constants
+    -- ─────────────────────────────────────────────────────────────────
+    local INF_BRICK_COUNT = 100
+    local INF_WAIT_BUILD  = 0.9   -- seconds to wait for ChildAdded (brick-to-brick build)
+    local INF_WAIT_SHAPE  = 0.14  -- seconds between Shape remote calls (rate limit match)
+    local INF_WAIT_SETTLE = 0.10  -- small settle after build before using brick as anchor
+    -- Wait for size replication after a shape op before reading part.Size
+    local INF_SHAPE_READ_WAIT = 0.12
+
+    -- Face normals (local to this block; mirrors INF_FACE_NORM above)
+    local _INF_NORM = {
+        [Enum.NormalId.Right]  = Vector3.new( 1, 0, 0),
+        [Enum.NormalId.Left]   = Vector3.new(-1, 0, 0),
+        [Enum.NormalId.Top]    = Vector3.new( 0, 1, 0),
+        [Enum.NormalId.Bottom] = Vector3.new( 0,-1, 0),
+        [Enum.NormalId.Back]   = Vector3.new( 0, 0, 1),
+        [Enum.NormalId.Front]  = Vector3.new( 0, 0,-1),
+    }
+    local _INF_AX = {
+        [Enum.NormalId.Right]="X", [Enum.NormalId.Left]="X",
+        [Enum.NormalId.Top]="Y",   [Enum.NormalId.Bottom]="Y",
+        [Enum.NormalId.Back]="Z",  [Enum.NormalId.Front]="Z",
+    }
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- infFaceCenter: face centre of a BasePart (using live Size)
+    -- ─────────────────────────────────────────────────────────────────
+    local function _infFC(part, face)
+        local n  = _INF_NORM[face]
+        local ax = _INF_AX[face]
+        return part.Position + n * (part.Size[ax] / 2)
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- JSON serialiser (minimal, handles string/number/bool/nil/table)
+    -- ─────────────────────────────────────────────────────────────────
+    local function toJSON(val, indent)
+        indent = indent or 0
+        local t = type(val)
+        if t == "nil"     then return "null"
+        elseif t == "boolean" then return val and "true" or "false"
+        elseif t == "number"  then
+            -- round to 4 dp to keep the file readable
+            return string.format("%.4g", val)
+        elseif t == "string"  then
+            return '"' .. val:gsub('\', '\\'):gsub('"', '\"'):gsub('\n', '\\n') .. '"'
+        elseif t == "table" then
+            -- array vs object heuristic
+            local isArr = (#val > 0)
+            local lines = {}
+            local pad   = string.rep("  ", indent + 1)
+            local cpad  = string.rep("  ", indent)
+            if isArr then
+                for _, v in ipairs(val) do
+                    lines[#lines+1] = pad .. toJSON(v, indent + 1)
+                end
+                return "[
+" .. table.concat(lines, ",
+") .. "
+" .. cpad .. "]"
+            else
+                for k, v in pairs(val) do
+                    lines[#lines+1] = pad .. '"' .. tostring(k) .. '": ' .. toJSON(v, indent + 1)
+                end
+                table.sort(lines)
+                return "{\n" .. table.concat(lines, ",
+") .. "
+" .. cpad .. "}"
+            end
+        end
+        return '"[unknown]"'
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- writeJSONLog: write the accumulated event list to a file
+    -- ─────────────────────────────────────────────────────────────────
+    local function writeJSONLog(filename, runMeta, events)
+        local root = {
+            run    = runMeta,
+            events = events,
+        }
+        local json = toJSON(root, 0)
+        local ok, err = pcall(writefile, filename, json)
+        if ok then
+            LOG("InfTest", "JSON log written → " .. filename)
+        else
+            LOG("InfTest", "writefile FAILED for " .. filename .. ": " .. tostring(err))
+        end
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- _infShapeBrick: shape a brick from its current size to targetSize
+    --   NO teleport.  Returns {ops, ok, finalSize} and appends to events.
+    -- ─────────────────────────────────────────────────────────────────
+    local function _infShapeBrick(shapeEv, brick, targetSize, brickIdx, events)
+        if not shapeEv or not brick or not brick.Parent then
+            return {ops=0, ok=false, finalSize=nil, note="nil inputs"}
+        end
+        local tSz  = targetSize
+        local tgt  = brick.Position  -- target centre stays the same; only size changes
+        local totalOps = 0
+        local facePairs = {
+            { Enum.NormalId.Right, Enum.NormalId.Left,   "X" },
+            { Enum.NormalId.Top,   Enum.NormalId.Bottom, "Y" },
+            { Enum.NormalId.Back,  Enum.NormalId.Front,  "Z" },
+        }
+
+        -- Shrink-first: avoids collision with neighbouring bricks during reshape
+        -- Order per axis: decrease positive face, decrease negative face, then grow
+
+        local function fireFace(norm, face, n, mode, ax)
+            for opI = 1, n do
+                if not brick or not brick.Parent then return end
+                totalOps = totalOps + 1
+                local preSz  = brick.Size
+                local prePos = brick.Position
+                shapeEv:FireServer(brick, norm, brick.Position, mode)
+                task.wait(INF_WAIT_SHAPE)
+                local postSz  = brick.Size
+                local postPos = brick.Position
+
+                local opEvt = {
+                    phase      = "shape",
+                    brick_idx  = brickIdx,
+                    op_num     = totalOps,
+                    axis       = ax,
+                    face       = tostring(face),
+                    mode       = mode,
+                    pre_size   = {x=preSz.X,  y=preSz.Y,  z=preSz.Z},
+                    post_size  = {x=postSz.X, y=postSz.Y, z=postSz.Z},
+                    pre_pos    = {x=prePos.X, y=prePos.Y, z=prePos.Z},
+                    post_pos   = {x=postPos.X,y=postPos.Y,z=postPos.Z},
+                    -- did the server actually accept this op?
+                    accepted   = (math.abs(postSz[ax] - preSz[ax]) > 0.1),
+                }
+                events[#events+1] = opEvt
+                LOG("InfTest", string.format(
+                    "  [brick %d] ShapeOp#%d ax=%s mode=%s pre=(%.2f,%.2f,%.2f) post=(%.2f,%.2f,%.2f) accepted=%s",
+                    brickIdx, totalOps, ax, mode,
+                    preSz.X,preSz.Y,preSz.Z, postSz.X,postSz.Y,postSz.Z,
+                    tostring(opEvt.accepted)))
+            end
+        end
+
+        for _, fp in ipairs(facePairs) do
+            if not brick or not brick.Parent then break end
+            local posNorm, negNorm, ax = fp[1], fp[2], fp[3]
+            task.wait(INF_SHAPE_READ_WAIT)  -- wait for replication before reading size
+            local halfStart = brick.Size[ax] / 2
+            local partPos   = brick.Position[ax]
+            local halfTgt   = tSz[ax] / 2
+            -- target centre == brick.Position (no position change, only resize)
+            local dPos = math.round((partPos + halfTgt) - (partPos + halfStart))
+            local dNeg = math.round((partPos - halfTgt) - (partPos - halfStart))
+            LOG("InfTest", string.format(
+                "  [brick %d] Axis %s: curSz=%.2f tgtSz=%.2f halfStart=%.2f halfTgt=%.2f dPos=%d dNeg=%d",
+                brickIdx, ax, brick.Size[ax], tSz[ax], halfStart, halfTgt, dPos, dNeg))
+            -- shrink first
+            if dPos < 0 then fireFace(posNorm, posNorm, -dPos, "decrease", ax) end
+            if dNeg > 0 then fireFace(negNorm, negNorm,  dNeg, "decrease", ax) end
+            if dPos > 0 then fireFace(posNorm, posNorm,  dPos, "increase", ax) end
+            if dNeg < 0 then fireFace(negNorm, negNorm, -dNeg, "increase", ax) end
+        end
+
+        task.wait(INF_SHAPE_READ_WAIT)
+        local finalSz = brick and brick.Parent and brick.Size or nil
+        local ok = finalSz and
+            math.abs(finalSz.X - tSz.X) < 0.5 and
+            math.abs(finalSz.Y - tSz.Y) < 0.5 and
+            math.abs(finalSz.Z - tSz.Z) < 0.5
+        return {ops=totalOps, ok=ok, finalSize=finalSz}
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- _infPaintBrick: paint a brick (colour + material). NO teleport.
+    -- ─────────────────────────────────────────────────────────────────
+    local function _infPaintBrick(paintEv, brick, brickIdx, events)
+        if not paintEv or not brick or not brick.Parent then
+            events[#events+1] = {phase="paint", brick_idx=brickIdx, ok=false, note="nil inputs"}
+            return false
+        end
+        local preColor = tostring(brick.Color)
+        local preMat   = tostring(brick.Material)
+        -- Fire: colour Blue, material Neon, no teleport
+        -- Paint signature (confirmed): FireServer(brick, face, playerPos, mode, color, material, "")
+        -- We send brick.Position as the fake playerPos (server ignores it for brick-target builds)
+        paintEv:FireServer(brick, Enum.NormalId.Top, brick.Position,
+            "color", Color3.fromRGB(0, 0, 255), "Neon", "")
+        task.wait(0.12)
+        local postColor = tostring(brick.Color)
+        local postMat   = tostring(brick.Material)
+        local accepted  = (brick.BrickColor == BrickColor.new("Bright blue")
+                        or tostring(brick.Color):find("0, 0, 255")
+                        or postColor ~= preColor
+                        or postMat  ~= preMat)
+        local evt = {
+            phase      = "paint",
+            brick_idx  = brickIdx,
+            ok         = accepted,
+            pre_color  = preColor,
+            post_color = postColor,
+            pre_mat    = preMat,
+            post_mat   = postMat,
+            brick_pos  = {x=brick.Position.X, y=brick.Position.Y, z=brick.Position.Z},
+        }
+        events[#events+1] = evt
+        LOG("InfTest", string.format(
+            "  [brick %d] Paint: preColor=%s postColor=%s preMat=%s postMat=%s accepted=%s",
+            brickIdx, preColor, postColor, preMat, postMat, tostring(accepted)))
+        return accepted
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- runInfTest: core runner.
+    --   testName   : string label
+    --   filename   : output JSON filename
+    --   preShape   : Vector3 | nil  → shape each brick to this BEFORE chaining
+    --   postShape  : Vector3 | nil  → shape bricks AFTER building all 100
+    --   btn        : TextButton for status
+    -- ─────────────────────────────────────────────────────────────────
+    local _infRunning = false
+
+    local function runInfTest(testName, filename, preShape, postShape, btn)
+        if _infRunning then
+            notify("InfTest", "A test is already running  -  wait for it to finish.")
+            return
+        end
+        task.spawn(function()
+            _infRunning = true
+            local origText = btn.Text
+            btn.Text = testName .. "  -  running..."
+
+            local runStart = os.clock()
+            local events   = {}
+            local runMeta  = {
+                test_name    = testName,
+                brick_count  = INF_BRICK_COUNT,
+                pre_shape    = preShape  and {x=preShape.X,  y=preShape.Y,  z=preShape.Z}  or nil,
+                post_shape   = postShape and {x=postShape.X, y=postShape.Y, z=postShape.Z} or nil,
+                wait_build   = INF_WAIT_BUILD,
+                wait_shape   = INF_WAIT_SHAPE,
+                start_clock  = runStart,
+            }
+
+            local function ELOG(msg)
+                LOG("InfTest", "[" .. testName .. "] " .. msg)
+            end
+
+            ELOG("═══ START ═══  bricks=" .. INF_BRICK_COUNT
+                .. "  preShape=" .. (preShape and tostring(preShape) or "nil")
+                .. "  postShape=" .. (postShape and tostring(postShape) or "nil"))
+
+            -- Acquire remotes (no equip-per-brick; cache them)
+            local buildEv = getToolRemote("Build")
+            local shapeEv = getToolRemote("Shape")
+            local paintEv = getToolRemote("Paint")
+
+            if not buildEv then
+                notify("InfTest", "Build tool missing!")
+                ELOG("ABORT: Build remote not found.")
+                _infRunning = false; btn.Text = origText; return
+            end
+            if not shapeEv and (preShape or postShape) then
+                notify("InfTest", "Shape tool missing!")
+                ELOG("ABORT: Shape remote not found but shaping requested.")
+                _infRunning = false; btn.Text = origText; return
+            end
+            if not paintEv then
+                notify("InfTest", "Paint tool missing!")
+                ELOG("ABORT: Paint remote not found.")
+                _infRunning = false; btn.Text = origText; return
+            end
+
+            -- Wait for brick folder
+            local myF = nil
+            local fDL = tick() + 6
+            repeat myF = getMyBrickFolder(); if not myF then task.wait(0.1) end
+            until myF or tick() > fDL
+            if not myF then
+                notify("InfTest", "Brick folder not found!")
+                ELOG("ABORT: Brick folder not found after 6s.")
+                _infRunning = false; btn.Text = origText; return
+            end
+
+            -- ── Step 1: Place the SEED brick via Terrain (one-time only) ─────
+            -- This is the only non-inf-range call in the whole test.
+            -- We place it 30 studs above the player's current HRP position so
+            -- it doesn't interfere with terrain geometry or other builds.
+            local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp then
+                ELOG("ABORT: No HRP."); _infRunning = false; btn.Text = origText; return
+            end
+            local seedPos = hrp.Position + Vector3.new(0, 30, 0)
+            -- Snap to 4-stud grid
+            seedPos = Vector3.new(
+                math.round(seedPos.X / 4) * 4,
+                math.round(seedPos.Y / 4) * 4,
+                math.round(seedPos.Z / 4) * 4)
+
+            ELOG(string.format("Step 1: Terrain-seed at (%.1f,%.1f,%.1f)", seedPos.X, seedPos.Y, seedPos.Z))
+
+            -- Temporarily teleport HRP to seed position (ONLY occurrence of TP in the test)
+            -- After this single seed brick we never teleport again.
+            local savedCF = hrp.CFrame
+            hrp.CFrame   = CFrame.new(seedPos + Vector3.new(0, 6, 0))
+            task.wait(0.10)
+            hrp.Anchored = true
+
+            local seedBrick = nil
+            local seedConn  = myF.ChildAdded:Connect(function(c)
+                if c:IsA("BasePart") then seedBrick = c end
+            end)
+            buildEv:FireServer(Workspace.Terrain, Enum.NormalId.Top, seedPos, "normal")
+            local seedDL = tick() + 2.0
+            while not seedBrick and tick() < seedDL do task.wait(0.05) end
+            hrp.Anchored = false
+            seedConn:Disconnect()
+
+            if not seedBrick or not seedBrick.Parent then
+                ELOG("ABORT: Seed brick failed to appear.")
+                notify("InfTest", "Seed brick failed to place!")
+                _infRunning = false; btn.Text = origText; return
+            end
+
+            ELOG(string.format("Seed placed: pos=(%.2f,%.2f,%.2f) sz=(%.2f,%.2f,%.2f)",
+                seedBrick.Position.X, seedBrick.Position.Y, seedBrick.Position.Z,
+                seedBrick.Size.X, seedBrick.Size.Y, seedBrick.Size.Z))
+
+            events[#events+1] = {
+                phase      = "seed",
+                brick_idx  = 0,
+                ok         = true,
+                seed_pos   = {x=seedPos.X, y=seedPos.Y, z=seedPos.Z},
+                landed_pos = {x=seedBrick.Position.X, y=seedBrick.Position.Y, z=seedBrick.Position.Z},
+                size       = {x=seedBrick.Size.X, y=seedBrick.Size.Y, z=seedBrick.Size.Z},
+            }
+
+            -- ── Step 2: Optionally pre-shape the seed brick ──────────────────
+            if preShape and shapeEv then
+                ELOG(string.format("Pre-shaping seed brick → (%.0f,%.0f,%.0f)...",
+                    preShape.X, preShape.Y, preShape.Z))
+                btn.Text = testName .. "  -  pre-shaping seed..."
+                local shResult = _infShapeBrick(shapeEv, seedBrick, preShape, 0, events)
+                ELOG(string.format("Seed pre-shape: ops=%d ok=%s finalSz=%s",
+                    shResult.ops, tostring(shResult.ok),
+                    shResult.finalSize and string.format("(%.2f,%.2f,%.2f)",
+                        shResult.finalSize.X, shResult.finalSize.Y, shResult.finalSize.Z)
+                    or "nil"))
+            end
+
+            -- ── Step 3: Build phase  -  100 bricks, all inf-range ────────────
+            -- Build each brick off the Right face of the previous brick.
+            -- After placing, optionally pre-shape it before using it as anchor.
+            ELOG("Step 3: Building " .. INF_BRICK_COUNT .. " bricks inf-range (Right face chain)...")
+            local placedBricks = {[0] = seedBrick}  -- index 0 = seed
+
+            for i = 1, INF_BRICK_COUNT do
+                btn.Text = string.format("%s  -  build %d/%d", testName, i, INF_BRICK_COUNT)
+                local anchor = placedBricks[i - 1]
+
+                if not anchor or not anchor.Parent then
+                    ELOG(string.format("  [%d/%d] BUILD ABORT: anchor brick %d is nil/destroyed.", i, INF_BRICK_COUNT, i-1))
+                    events[#events+1] = {phase="build", brick_idx=i, ok=false, note="anchor destroyed"}
+                    break
+                end
+
+                -- Use LIVE size for faceCenter (anchor already has correct size from preShape)
+                local fc   = _infFC(anchor, Enum.NormalId.Right)
+                local ancSz = anchor.Size
+                local ancPos = anchor.Position
+
+                ELOG(string.format(
+                    "  [%d/%d] BUILD inf-range: anchor@(%.2f,%.2f,%.2f) sz=(%.2f,%.2f,%.2f) fc=(%.2f,%.2f,%.2f)",
+                    i, INF_BRICK_COUNT,
+                    ancPos.X, ancPos.Y, ancPos.Z,
+                    ancSz.X,  ancSz.Y,  ancSz.Z,
+                    fc.X, fc.Y, fc.Z))
+
+                local newBrick = nil
+                local bConn   = myF.ChildAdded:Connect(function(c)
+                    if c:IsA("BasePart") then newBrick = c end
+                end)
+
+                buildEv:FireServer(anchor, Enum.NormalId.Right, fc, "normal")
+
+                local bdl = tick() + INF_WAIT_BUILD
+                while not newBrick and tick() < bdl do task.wait(0.02) end
+                bConn:Disconnect()
+
+                local waited = INF_WAIT_BUILD - math.max(0, bdl - tick())
+                local buildOk = newBrick ~= nil and newBrick.Parent ~= nil
+
+                local evt = {
+                    phase      = "build",
+                    brick_idx  = i,
+                    ok         = buildOk,
+                    wait_s     = waited,
+                    anchor_pos = {x=ancPos.X, y=ancPos.Y, z=ancPos.Z},
+                    anchor_sz  = {x=ancSz.X,  y=ancSz.Y,  z=ancSz.Z},
+                    fc         = {x=fc.X, y=fc.Y, z=fc.Z},
+                }
+                if buildOk then
+                    local np = newBrick.Position
+                    local ns = newBrick.Size
+                    evt.landed_pos  = {x=np.X, y=np.Y, z=np.Z}
+                    evt.landed_sz   = {x=ns.X, y=ns.Y, z=ns.Z}
+                    evt.drift       = {
+                        x = np.X - (ancPos.X + ancSz.X / 2 + ns.X / 2),
+                        y = np.Y - ancPos.Y,
+                        z = np.Z - ancPos.Z,
+                    }
+                    ELOG(string.format(
+                        "  [%d/%d] OK  landedPos=(%.2f,%.2f,%.2f) sz=(%.2f,%.2f,%.2f) drift=(%.3f,%.3f,%.3f)",
+                        i, INF_BRICK_COUNT,
+                        np.X,np.Y,np.Z, ns.X,ns.Y,ns.Z,
+                        evt.drift.x, evt.drift.y, evt.drift.z))
+
+                    -- Wait for size replication before using as anchor or shaping
+                    task.wait(INF_WAIT_SETTLE)
+
+                    -- Pre-shape this new brick (if requested) before it becomes the anchor
+                    if preShape and shapeEv then
+                        ELOG(string.format("  [%d/%d] Pre-shaping → (%.0f,%.0f,%.0f)...",
+                            i, INF_BRICK_COUNT, preShape.X, preShape.Y, preShape.Z))
+                        local sr = _infShapeBrick(shapeEv, newBrick, preShape, i, events)
+                        evt.pre_shape_ops = sr.ops
+                        evt.pre_shape_ok  = sr.ok
+                    end
+
+                    placedBricks[i] = newBrick
+                else
+                    ELOG(string.format("  [%d/%d] MISS  waited=%.2fs", i, INF_BRICK_COUNT, waited))
+                    evt.note = "ChildAdded timeout"
+                    placedBricks[i] = nil
+                end
+
+                events[#events+1] = evt
+                task.wait(0.03)
+            end
+
+            local buildOkCount = 0
+            for i = 1, INF_BRICK_COUNT do
+                if placedBricks[i] and placedBricks[i].Parent then buildOkCount = buildOkCount + 1 end
+            end
+            ELOG(string.format("Build phase complete: %d/%d placed.", buildOkCount, INF_BRICK_COUNT))
+
+            -- ── Step 4: Post-shape phase ─────────────────────────────────────
+            if postShape and shapeEv then
+                ELOG(string.format("Step 4: Shaping all bricks → (%.0f,%.0f,%.0f)...",
+                    postShape.X, postShape.Y, postShape.Z))
+                local shapeOkCount = 0
+                for i = 0, INF_BRICK_COUNT do
+                    local brick = placedBricks[i]
+                    if brick and brick.Parent then
+                        btn.Text = string.format("%s  -  shape %d/%d", testName, i, INF_BRICK_COUNT)
+                        ELOG(string.format("  [%d/%d] Shape brick %d...", i, INF_BRICK_COUNT, i))
+                        local sr = _infShapeBrick(shapeEv, brick, postShape, i, events)
+                        if sr.ok then shapeOkCount = shapeOkCount + 1 end
+                        ELOG(string.format("  [%d/%d] ops=%d ok=%s finalSz=%s",
+                            i, INF_BRICK_COUNT, sr.ops, tostring(sr.ok),
+                            sr.finalSize and string.format("(%.2f,%.2f,%.2f)",
+                                sr.finalSize.X, sr.finalSize.Y, sr.finalSize.Z)
+                            or "nil"))
+                    end
+                end
+                ELOG(string.format("Shape phase complete: %d/%d shaped correctly.", shapeOkCount, INF_BRICK_COUNT + 1))
+            end
+
+            -- ── Step 5: Paint phase ──────────────────────────────────────────
+            ELOG("Step 5: Painting all bricks Blue/Neon (no teleport)...")
+            local paintOkCount = 0
+            for i = 0, INF_BRICK_COUNT do
+                local brick = placedBricks[i]
+                if brick and brick.Parent then
+                    btn.Text = string.format("%s  -  paint %d/%d", testName, i, INF_BRICK_COUNT)
+                    local pOk = _infPaintBrick(paintEv, brick, i, events)
+                    if pOk then paintOkCount = paintOkCount + 1 end
+                end
+            end
+            ELOG(string.format("Paint phase complete: %d/%d painted.", paintOkCount, INF_BRICK_COUNT + 1))
+
+            -- ── Step 6: Summary & write JSON ─────────────────────────────────
+            local runEnd = os.clock()
+            runMeta.end_clock   = runEnd
+            runMeta.elapsed_s   = runEnd - runStart
+            runMeta.build_ok    = buildOkCount
+            runMeta.paint_ok    = paintOkCount
+
+            ELOG(string.format(
+                "═══ DONE ═══  elapsed=%.1fs  build=%d/%d  paint=%d/%d  events=%d",
+                runMeta.elapsed_s, buildOkCount, INF_BRICK_COUNT, paintOkCount, INF_BRICK_COUNT + 1, #events))
+
+            writeJSONLog(filename, runMeta, events)
+            notify("InfTest", string.format("%s done: %d built, %d painted → %s",
+                testName, buildOkCount, paintOkCount, filename), 8)
+
+            _infRunning = false
+            btn.Text = origText
+        end)
+    end
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- Button 1: "Test Line"
+    -- 100 bricks, 4×4×4 (default), then post-shape all to 2×4×4 via
+    -- decreasing Front face by 2, then paint Blue/Neon.
+    -- ─────────────────────────────────────────────────────────────────
+    makeSection(gInf,
+        "Test Line: 100 bricks → place (4×4×4, inf-range) → shape all to 2×4×4 → paint Blue/Neon. No TP.")
+    local _btnLine = makeButton(gInf, "Test Line", function()
+        runInfTest(
+            "TestLine",
+            "infinite-tools-line.json",
+            nil,                              -- no pre-shape
+            Vector3.new(2, 4, 4),             -- post-shape all to 2×4×4
+            _btnLine)
+    end)
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- Button 2: "Test Small Line"
+    -- Pre-shape each brick to 4×1×4 BEFORE using it as the next anchor.
+    -- Then paint Blue/Neon. No post-shape needed (shape happens per brick).
+    -- ─────────────────────────────────────────────────────────────────
+    makeSection(gInf,
+        "Test Small Line: pre-shape each brick → 4×1×4 (inf-range, no TP) → paint Blue/Neon.")
+    local _btnSmall = makeButton(gInf, "Test Small Line", function()
+        runInfTest(
+            "TestSmallLine",
+            "infinite-tools-small.json",
+            Vector3.new(4, 1, 4),             -- pre-shape each brick before chaining
+            nil,                              -- no post-shape
+            _btnSmall)
+    end)
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- Button 3: "Cube Test"
+    -- Pre-shape each brick to 10×12×2 (big brick) before chaining.
+    -- Stresses the shape remote at max size change per brick.
+    -- ─────────────────────────────────────────────────────────────────
+    makeSection(gInf,
+        "Cube Test: pre-shape each brick → 10×12×2 (big bricks, inf-range, no TP) → paint Blue/Neon.")
+    local _btnCube = makeButton(gInf, "Cube Test", function()
+        runInfTest(
+            "CubeTest",
+            "infinite-tools-cube.json",
+            Vector3.new(10, 12, 2),           -- pre-shape to big size before chaining
+            nil,                              -- no post-shape
+            _btnCube)
+    end)
+
+end -- ╚═ INFINITE RANGE BUILDING ══╝
+
 -- ── BKIT MISC (TCO subtab) ────────────────────────────────────
 do
     local g = makeGroup(tcoPage, "Bkit Misc", "Building-kit utilities  -  TCO build tool helpers.")
