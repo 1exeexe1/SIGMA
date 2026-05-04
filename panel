@@ -16345,13 +16345,13 @@ do
     -- ─────────────────────────────────────────────────────────────────
     makeSection(gInf,
         "Test Line: 100 bricks → place (4×4×4, inf-range) → shape all to 2×4×4 → paint Blue/Neon. No TP.")
-    local _btnLine = makeButton(gInf, "Test Line", function()
+    local _btnLine = makeButton(gInf, "Test Line", function(passedBtn)
         runInfTest(
             "TestLine",
             "infinite-tools-line.json",
             nil,                              -- no pre-shape
             Vector3.new(2, 4, 4),             -- post-shape all to 2×4×4
-            _btnLine)
+            passedBtn)
     end)
 
     -- ─────────────────────────────────────────────────────────────────
@@ -16361,13 +16361,13 @@ do
     -- ─────────────────────────────────────────────────────────────────
     makeSection(gInf,
         "Test Small Line: pre-shape each brick → 4×1×4 (inf-range, no TP) → paint Blue/Neon.")
-    local _btnSmall = makeButton(gInf, "Test Small Line", function()
+    local _btnSmall = makeButton(gInf, "Test Small Line", function(passedBtn)
         runInfTest(
             "TestSmallLine",
             "infinite-tools-small.json",
             Vector3.new(4, 1, 4),             -- pre-shape each brick before chaining
             nil,                              -- no post-shape
-            _btnSmall)
+            passedBtn)
     end)
 
     -- ─────────────────────────────────────────────────────────────────
@@ -16377,13 +16377,13 @@ do
     -- ─────────────────────────────────────────────────────────────────
     makeSection(gInf,
         "Cube Test: pre-shape each brick → 10×12×2 (big bricks, inf-range, no TP) → paint Blue/Neon.")
-    local _btnCube = makeButton(gInf, "Cube Test", function()
+    local _btnCube = makeButton(gInf, "Cube Test", function(passedBtn)
         runInfTest(
             "CubeTest",
             "infinite-tools-cube.json",
             Vector3.new(10, 12, 2),           -- pre-shape to big size before chaining
             nil,                              -- no post-shape
-            _btnCube)
+            passedBtn)
     end)
 
 end -- ╚═ INFINITE RANGE BUILDING ══╝
@@ -24141,9 +24141,9 @@ do
     makeSection(gSet, "Full list & prefix config → CMDs tab")
 end
 
-end
 -- ── AUTO-LOAD SETTINGS ON EXECUTE ───────────────────────────
 task.defer(sigmaLoadSettings)
 
+end -- closes do -- ╔═ CONSTRUCT TOOL INTERNALS ══╗
 end -- ╚═ BUILD SYSTEM INTERNALS ══╝
 _buildInit()
