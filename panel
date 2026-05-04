@@ -15885,12 +15885,11 @@ do
         if t == "nil"     then return "null"
         elseif t == "boolean" then return val and "true" or "false"
         elseif t == "number"  then
-            -- round to 4 dp to keep the file readable
             return string.format("%.4g", val)
         elseif t == "string"  then
-            return '"' .. val:gsub('\', '\\'):gsub('"', '\"'):gsub('\n', '\\n') .. '"'
+            local s = val:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
+            return '"' .. s .. '"'
         elseif t == "table" then
-            -- array vs object heuristic
             local isArr = (#val > 0)
             local lines = {}
             local pad   = string.rep("  ", indent + 1)
@@ -15899,18 +15898,13 @@ do
                 for _, v in ipairs(val) do
                     lines[#lines+1] = pad .. toJSON(v, indent + 1)
                 end
-                return "[
-" .. table.concat(lines, ",
-") .. "
-" .. cpad .. "]"
+                return "[\n" .. table.concat(lines, ",\n") .. "\n" .. cpad .. "]"
             else
                 for k, v in pairs(val) do
                     lines[#lines+1] = pad .. '"' .. tostring(k) .. '": ' .. toJSON(v, indent + 1)
                 end
                 table.sort(lines)
-                return "{\n" .. table.concat(lines, ",
-") .. "
-" .. cpad .. "}"
+                return "{\n" .. table.concat(lines, ",\n") .. "\n" .. cpad .. "}"
             end
         end
         return '"[unknown]"'
