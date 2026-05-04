@@ -546,12 +546,38 @@ local notify
 -- ── Console logger ──────────────────────────────────────────
 -- Usage: LOG("Load", "Phase 1: OK!") → print("[Sigma Load] Phase 1: OK!")
 -- DEV RULE: no +=, no goto, no CRLF
+-- ── File logger ─────────────────────────────────────────────
+-- All LOG() output is written to "Build_C-logs.txt" in the
+-- executor writefile root AND echoed to print()/console.
+-- Appended line-by-line so a mid-build crash keeps prior output.
+-- File is NOT cleared per run; a separator marks each new run.
+local _LOG_FILE   = "Build_C-logs.txt"
+local _LOG_RUN_ID = math.random(100000, 999999)
+local _logReady   = false
+do
+    local sep = string.format(
+        "\n\n=== SIGMA BUILD_C-LOGS  run#%d  %s ===\n",
+        _LOG_RUN_ID,
+        (os and os.date and os.date("%H:%M:%S")) or "?")
+    local ok, existing = pcall(readfile, _LOG_FILE)
+    local base = ok and existing or ""
+    local wok = pcall(writefile, _LOG_FILE, base .. sep)
+    _logReady = wok
+end
 local function LOG(tag, ...)
     local parts = {"[Sigma " .. tag .. "]"}
     for i = 1, select("#", ...) do
         parts[#parts+1] = tostring(select(i, ...))
     end
-    print(table.concat(parts, " "))
+    local line = table.concat(parts, " ")
+    print(line)   -- always echo
+    if _logReady then
+        pcall(function()
+            local ts = string.format("[%.3f] ", os.clock())
+            local ok2, prev = pcall(readfile, _LOG_FILE)
+            if ok2 then writefile(_LOG_FILE, prev .. ts .. line .. "\n") end
+        end)
+    end
 end
 
 -- ── EXTERNAL WHITELIST ────────────────────────────────────────
@@ -7118,9 +7144,23 @@ local function buildInfBFS(plan, bmode, btn, previewParts, scaffoldTrack)
         if anchorPart and anchorPart.Parent and entry.face then
             -- ── Infinite-range: no teleport ──────────────────────────────────
             local fc = infFaceCenter(anchorPart, entry.face)
+            LOG("BFS", string.format(
+                "[%d/%d] INF-RANGE: anchor=(%.1f,%.1f,%.1f) anchorSz=(%.1f,%.1f,%.1f) face=%s fc=(%.1f,%.1f,%.1f) target=(%.1f,%.1f,%.1f)",
+                idx, total,
+                anchorPart.Position.X, anchorPart.Position.Y, anchorPart.Position.Z,
+                anchorPart.Size.X, anchorPart.Size.Y, anchorPart.Size.Z,
+                tostring(entry.face),
+                fc.X, fc.Y, fc.Z,
+                entry.pos.X, entry.pos.Y, entry.pos.Z))
             buildEv:FireServer(anchorPart, entry.face, fc, bmode)
         else
             -- ── Terrain fallback: one-time teleport (first brick / no path) ──
+            LOG("BFS", string.format(
+                "[%d/%d] TERRAIN-TP: pos=(%.1f,%.1f,%.1f) anchorPos=%s face=%s",
+                idx, total,
+                entry.pos.X, entry.pos.Y, entry.pos.Z,
+                entry.anchorPos and string.format("(%.1f,%.1f,%.1f)", entry.anchorPos.X, entry.anchorPos.Y, entry.anchorPos.Z) or "nil",
+                tostring(entry.face)))
             hrp.CFrame   = CFrame.new(entry.pos + Vector3.new(0, 6, 0))
             task.wait(BUILD_SETTLE)
             hrp.Anchored = true
@@ -7137,11 +7177,23 @@ local function buildInfBFS(plan, bmode, btn, previewParts, scaffoldTrack)
             posToPartRef[infPK(lastBuilt.Position)] = lastBuilt
             -- Also register at the planned position (in case of sub-stud snap drift)
             posToPartRef[infPK(entry.pos)]          = lastBuilt
+            LOG("BFS", string.format(
+                "[%d/%d] PLACED: landedPos=(%.2f,%.2f,%.2f) plannedPos=(%.1f,%.1f,%.1f) drift=(%.2f,%.2f,%.2f)",
+                idx, total,
+                lastBuilt.Position.X, lastBuilt.Position.Y, lastBuilt.Position.Z,
+                entry.pos.X, entry.pos.Y, entry.pos.Z,
+                lastBuilt.Position.X - entry.pos.X,
+                lastBuilt.Position.Y - entry.pos.Y,
+                lastBuilt.Position.Z - entry.pos.Z))
             if entry.isScaffold and scaffoldTrack then
                 scaffoldTrack[#scaffoldTrack+1] = lastBuilt
             end
         else
             missed = missed + 1
+            LOG("BFS", string.format(
+                "[%d/%d] MISS: pos=(%.1f,%.1f,%.1f) waited=%.2fs",
+                idx, total,
+                entry.pos.X, entry.pos.Y, entry.pos.Z, WAIT_DL))
         end
 
         task.wait(0.02)   -- minimum inter-brick spacing (was 0.06)
@@ -8754,15 +8806,30 @@ do
                             if not shapeEv or not part or not part.Parent then return end
                             local tSz = meta.targetSize
                             local tgt = meta.rawCenter
+                            -- LOG entry: current vs target size BEFORE any ops
+                            LOG("Load", string.format(
+                                "  applyShapeOps START  shrinkFirst=%s  curSz=(%.2f,%.2f,%.2f)  tgtSz=(%.0f,%.0f,%.0f)  curPos=(%.2f,%.2f,%.2f)  tgtCtr=(%.2f,%.2f,%.2f)",
+                                tostring(shrinkFirst),
+                                part.Size.X, part.Size.Y, part.Size.Z,
+                                tSz.X, tSz.Y, tSz.Z,
+                                part.Position.X, part.Position.Y, part.Position.Z,
+                                tgt.X, tgt.Y, tgt.Z))
                             local facePairs = {
                                 { Enum.NormalId.Right,  Enum.NormalId.Left,   "X" },
                                 { Enum.NormalId.Top,    Enum.NormalId.Bottom, "Y" },
                                 { Enum.NormalId.Back,   Enum.NormalId.Front,  "Z" },
                             }
-                            local function fireFace(norm, n, mode)
-                                for _ = 1, n do
+                            local totalOps = 0
+                            local function fireFace(norm, n, mode, ax)
+                                for opI = 1, n do
                                     if not part or not part.Parent then return end
                                     if S.buildStopped or S.skipBlock then return end
+                                    totalOps = totalOps + 1
+                                    LOG("Load", string.format(
+                                        "    ShapeOp#%d  ax=%s  mode=%s  preSize=(%.2f,%.2f,%.2f)  prePos=(%.2f,%.2f,%.2f)",
+                                        totalOps, tostring(ax), mode,
+                                        part.Size.X, part.Size.Y, part.Size.Z,
+                                        part.Position.X, part.Position.Y, part.Position.Z))
                                     shapeEv:FireServer(part, norm, part.Position, mode)
                                     task.wait(SHAPE_WAIT)
                                 end
@@ -8780,17 +8847,34 @@ do
                                 local halfTgt   = tSz[ax] / 2
                                 local dPos = math.round((tgt[ax]+halfTgt)-(partPos+halfStart))
                                 local dNeg = math.round((tgt[ax]-halfTgt)-(partPos-halfStart))
+                                LOG("Load", string.format(
+                                    "  Axis %s: halfStart=%.2f partPos=%.2f halfTgt=%.2f dPos=%d dNeg=%d",
+                                    ax, halfStart, partPos, halfTgt, dPos, dNeg))
                                 if shrinkFirst then
-                                    if dPos < 0 then fireFace(posNorm, -dPos, "decrease") end
-                                    if dNeg > 0 then fireFace(negNorm,  dNeg, "decrease") end
-                                    if dPos > 0 then fireFace(posNorm,  dPos, "increase") end
-                                    if dNeg < 0 then fireFace(negNorm, -dNeg, "increase") end
+                                    if dPos < 0 then fireFace(posNorm, -dPos, "decrease", ax) end
+                                    if dNeg > 0 then fireFace(negNorm,  dNeg, "decrease", ax) end
+                                    if dPos > 0 then fireFace(posNorm,  dPos, "increase", ax) end
+                                    if dNeg < 0 then fireFace(negNorm, -dNeg, "increase", ax) end
                                 else
-                                    if dPos > 0 then fireFace(posNorm,  dPos, "increase") end
-                                    if dNeg < 0 then fireFace(negNorm, -dNeg, "increase") end
-                                    if dPos < 0 then fireFace(posNorm, -dPos, "decrease") end
-                                    if dNeg > 0 then fireFace(negNorm,  dNeg, "decrease") end
+                                    if dPos > 0 then fireFace(posNorm,  dPos, "increase", ax) end
+                                    if dNeg < 0 then fireFace(negNorm, -dNeg, "increase", ax) end
+                                    if dPos < 0 then fireFace(posNorm, -dPos, "decrease", ax) end
+                                    if dNeg > 0 then fireFace(negNorm,  dNeg, "decrease", ax) end
                                 end
+                            end
+                            -- LOG exit: final size vs target
+                            if part and part.Parent then
+                                LOG("Load", string.format(
+                                    "  applyShapeOps END  totalOps=%d  finalSz=(%.2f,%.2f,%.2f)  tgtSz=(%.0f,%.0f,%.0f)  match=%s",
+                                    totalOps,
+                                    part.Size.X, part.Size.Y, part.Size.Z,
+                                    tSz.X, tSz.Y, tSz.Z,
+                                    tostring(
+                                        math.abs(part.Size.X - tSz.X) < 0.5 and
+                                        math.abs(part.Size.Y - tSz.Y) < 0.5 and
+                                        math.abs(part.Size.Z - tSz.Z) < 0.5)))
+                            else
+                                LOG("Load", "  applyShapeOps END  part destroyed/nil mid-ops!")
                             end
                         end
 
@@ -9046,9 +9130,18 @@ do
                                 -- the correct face-center even when replication is in flight.
                                 local anchorMeta  = shapedMeta[anchorMetaIdx]
                                     or (anchorMetaIdx == 0 and {targetSize = anchorPart.Size} or nil)
+                                local anchorHalfLive   = anchorPart.Size[ax] / 2
                                 local anchorHalf  = anchorMeta and anchorMeta.targetSize[ax] / 2
-                                    or anchorPart.Size[ax] / 2  -- fallback: live size (sentinel seeder)
+                                    or anchorHalfLive  -- fallback: live size (sentinel seeder)
                                 local faceCenter = anchorPart.Position + norm * anchorHalf
+                                -- Diagnostic: log live size vs targetSize to detect stale replication
+                                LOG("Load", string.format(
+                                    "  [%d/%d] StratA-FC: anchor#%d face=%s ax=%s liveHalf=%.3f targetHalf=%.3f DIFF=%.3f anchorPos=(%.1f,%.1f,%.1f) fc=(%.1f,%.1f,%.1f)",
+                                    orderIdx, #buildOrder,
+                                    anchorMetaIdx, tostring(anchorFace), ax,
+                                    anchorHalfLive, anchorHalf, anchorHalf - anchorHalfLive,
+                                    anchorPart.Position.X, anchorPart.Position.Y, anchorPart.Position.Z,
+                                    faceCenter.X, faceCenter.Y, faceCenter.Z))
 
                                 -- Face-attach is infinite range  -  no teleport needed.
                                 -- The server's brick-to-brick build path bypasses the
@@ -9256,6 +9349,24 @@ do
                                              and math.abs(pSz.Y - tSz.Y) <= EPS_SPAWN
                                              and math.abs(pSz.Z - tSz.Z) <= EPS_SPAWN
                             if not alreadySized then
+                                -- ── Teleport HRP to within 6 studs of the brick ──────────
+                                -- Shape remote IS range-checked (~50 stud server limit).
+                                -- Without this, bricks placed far from spawn miss 25-75% of
+                                -- shape ops, leaving wrong sizes. ShpFix already does this;
+                                -- the main loop must too.
+                                do
+                                    local _hrpS = lp.Character
+                                        and lp.Character:FindFirstChild("HumanoidRootPart")
+                                    if _hrpS then
+                                        _hrpS.CFrame   = CFrame.new(part.Position + Vector3.new(0, 6, 0))
+                                        task.wait(BUILD_SETTLE)
+                                        LOG("Load", string.format(
+                                            "  [%d/%d] Shape-TP: moved HRP to (%.1f,%.1f,%.1f) for part at (%.1f,%.1f,%.1f)",
+                                            orderIdx, #buildOrder,
+                                            _hrpS.CFrame.Position.X, _hrpS.CFrame.Position.Y, _hrpS.CFrame.Position.Z,
+                                            part.Position.X, part.Position.Y, part.Position.Z))
+                                    end
+                                end
                                 -- Shape ops: increase-first on initial pass
                                 applyShapeOps(part, meta, false)
                             else
@@ -9560,6 +9671,16 @@ do
                                             hrpF.CFrame   = CFrame.new(part2.Position
                                                 + Vector3.new(0, 6, 0))
                                             task.wait(BUILD_SETTLE)
+                                            LOG("Load", string.format(
+                                                "  ShpFix%d [%d/%d] TP: hrp→(%.1f,%.1f,%.1f) part@(%.1f,%.1f,%.1f) dist=%.1f",
+                                                passNum, metaIdx2, N,
+                                                hrpF.CFrame.Position.X, hrpF.CFrame.Position.Y, hrpF.CFrame.Position.Z,
+                                                part2.Position.X, part2.Position.Y, part2.Position.Z,
+                                                (hrpF.CFrame.Position - part2.Position).Magnitude))
+                                        else
+                                            LOG("Load", string.format(
+                                                "  ShpFix%d [%d/%d] TP: HRP MISSING - shape may fail range check!",
+                                                passNum, metaIdx2, N))
                                         end
                                         applyShapeOps(part2, meta2, true)
                                         task.wait(0.05)
