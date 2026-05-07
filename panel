@@ -448,14 +448,6 @@
 --    Fix:   spin180() kept on Unfreeze; goSlot(i) replaces rolling spreadIdx
 --
 --  v4.6.5  Fill Deposit anti-disarm (spin180 after Unfreeze)
---  v4.6.5  Infinite-range fix: Nanobots (all 4 modes: Delete/Unanchor/Paint-ify/
---          Materialize) now pass brick.Position instead of hrp.Position so flood
---          ops succeed on bricks far from the player. delCubes and targetDelcubes
---          loops also pass brick/cube.Position. Delete Aura and Paint Aura left
---          unchanged — they already work via client-side hrp.Position.
---          Debug "Infinite Range Building" test now restores player CFrame after
---          seed placement so all 100 subsequent build/shape/paint ops are proven
---          at true distance. Block comment corrected (was wrong "NO teleport").
 --  v4.6.4  Deposit tab revamp (doc-aligned)
 --  v4.6.3  Deposit tab patch (vault stash, Build kick, spread init)
 --  v4.6.2  Deposit tab fixes (anchor order, flood check)
@@ -6249,7 +6241,7 @@ do
                 if ev and hrp then
                     for _,v in pairs(Workspace:GetDescendants()) do
                         if not S.delCubes then break end
-                        if v.Name=="Brick" and v:IsA("BasePart") then ev:FireServer(v,v.Position); task.wait(0.005) end  -- inf-range: brick pos
+                        if v.Name=="Brick" and v:IsA("BasePart") then ev:FireServer(v,hrp.Position); task.wait(0.005) end
                     end
                 end
                 task.wait(0.05)
@@ -15831,13 +15823,7 @@ end
 -- ║                                                                 ║
 -- ║  Tests that Build / Shape / Paint remotes are truly infinite-   ║
 -- ║  range when a BasePart (not Terrain) is used as arg[1].        ║
--- ║                                                                 ║
--- ║  Mechanism: brick-targeted remotes trust the client-provided    ║
--- ║  playerPos argument. Passing brick.Position as playerPos tells  ║
--- ║  the server the player is at the brick — accepted from any      ║
--- ║  distance. Terrain ops DO validate server-side position, so     ║
--- ║  the seed brick requires one TP; after that the player is       ║
--- ║  restored to their original CFrame and all ops are inf-range.  ║
+-- ║  NO teleport is ever used in any of the three tests.           ║
 -- ║                                                                 ║
 -- ║  Button 1 - "Test Line"       : 100 bricks, 4×4×4 → 2×4×4     ║
 -- ║  Button 2 - "Test Small Line" : 100 bricks, shape→4×1×4 first  ║
@@ -15852,10 +15838,7 @@ do
     local dbgPage = dbgPage_ref
     local gInf = makeGroup(dbgPage, "Infinite Range Building",
         "Tests all 4 tools (Build / Shape / Paint / Delete) at infinite range "
-        .. "using brick-to-brick FireServer. "
-        .. "ONE seed TP to place the first terrain brick, then player is restored "
-        .. "to origin — all subsequent Build/Shape/Paint ops pass brick.Position "
-        .. "as playerPos so the server accepts them from any distance. "
+        .. "using brick-to-brick FireServer. NO teleport is used. "
         .. "Each test places 100 bricks via face-attach, shapes them, and paints them. "
         .. "Results are written to infinite-tools-*.json for analysis.")
 
@@ -16171,13 +16154,6 @@ do
             while not seedBrick and tick() < seedDL do task.wait(0.05) end
             hrp.Anchored = false
             seedConn:Disconnect()
-            -- ── Restore original player position so all subsequent ops are
-            -- ── truly long-range (player is NOT near the brick chain).
-            -- ── Build/Shape/Paint remotes pass brick.Position as playerPos,
-            -- ── so the server accepts them regardless of actual distance.
-            hrp.CFrame = savedCF
-            ELOG(string.format("Player restored to origin (%.1f,%.1f,%.1f)  -  all further ops are inf-range.",
-                savedCF.Position.X, savedCF.Position.Y, savedCF.Position.Z))
 
             if not seedBrick or not seedBrick.Parent then
                 ELOG("ABORT: Seed brick failed to appear.")
@@ -18454,27 +18430,25 @@ local function nanoNeighbours(part)
 end
 
 local function nanoAct(brick)
-    -- Infinite-range: brick-targeted remotes trust the client-provided playerPos.
-    -- Pass brick.Position so the server believes we're at the brick regardless of
-    -- actual player distance. No hrp dependency needed.
+    local hrp=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart"); if not hrp then return end
     if S.nanoMode=="Delete" then
-        local ev=equipAndGetEvent("Delete"); if ev then ev:FireServer(brick,brick.Position) end
+        local ev=equipAndGetEvent("Delete"); if ev then ev:FireServer(brick,hrp.Position) end
     elseif S.nanoMode=="Unanchor" then
         -- Use "material" mode so only the anchor state changes  -  colour is preserved.
-        local ev=equipAndGetEvent("Paint"); if ev then ev:FireServer(brick,Enum.NormalId.Top,brick.Position,"material",Color3.new(1,1,1),"anchor","") end
+        local ev=equipAndGetEvent("Paint"); if ev then ev:FireServer(brick,Enum.NormalId.Top,hrp.Position,"material",Color3.new(1,1,1),"anchor","") end
     elseif S.nanoMode=="Paint-ify" then
         -- Use "color" mode so material is never forced to a default.
         local ev=equipAndGetEvent("Paint"); if ev then
             local col=S.nanoColor
             if S.nanoRainbow then S.nanoRainbowH=(S.nanoRainbowH+0.03)%1; col=Color3.fromHSV(S.nanoRainbowH,1,1) end
-            ev:FireServer(brick,Enum.NormalId.Top,brick.Position,"color",col,"plastic","")
+            ev:FireServer(brick,Enum.NormalId.Top,hrp.Position,"color",col,"plastic","")
         end
     elseif S.nanoMode=="Materialize" then
         -- Apply both color and material at once with HANDSHAKE ("both 🤝").
         local ev=equipAndGetEvent("Paint"); if ev then
             local col=S.nanoMatColor
             if S.nanoMatRainbow then S.nanoMatRainbowH=(S.nanoMatRainbowH+0.03)%1; col=Color3.fromHSV(S.nanoMatRainbowH,1,1) end
-            ev:FireServer(brick,Enum.NormalId.Top,brick.Position,HANDSHAKE,col,S.nanoMatMat,"")
+            ev:FireServer(brick,Enum.NormalId.Top,hrp.Position,HANDSHAKE,col,S.nanoMatMat,"")
         end
     end
 end
@@ -19454,7 +19428,8 @@ task.spawn(function()
                     if tb and #tb:GetChildren()>0 then
                         for _,cube in ipairs(tb:GetChildren()) do
                             if not S.targetDelcubes then break end
-                            ev:FireServer(cube,cube.Position)  -- inf-range: brick pos, no hrp needed
+                            local hrp=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                            if hrp then ev:FireServer(cube,hrp.Position) end
                             task.wait(0.02)
                         end
                     end
