@@ -448,12 +448,14 @@
 --    Fix:   spin180() kept on Unfreeze; goSlot(i) replaces rolling spreadIdx
 --
 --  v4.6.5  Fill Deposit anti-disarm (spin180 after Unfreeze)
---  v4.6.5  Infinite-range fix: Delete Aura, delCubes, targetDelcubes, all
---          Nanobot modes (Delete/Unanchor/Paint-ify/Materialize), Paint Aura
---          batch flush — all now pass brick.Position (not hrp.Position) so the
---          server accepts the remote from any distance. Debug "Infinite Range
---          Building" test now restores player CFrame after seed so all 100
---          build/shape/paint ops are proven truly long-range.
+--  v4.6.5  Infinite-range fix: Nanobots (all 4 modes: Delete/Unanchor/Paint-ify/
+--          Materialize) now pass brick.Position instead of hrp.Position so flood
+--          ops succeed on bricks far from the player. delCubes and targetDelcubes
+--          loops also pass brick/cube.Position. Delete Aura and Paint Aura left
+--          unchanged — they already work via client-side hrp.Position.
+--          Debug "Infinite Range Building" test now restores player CFrame after
+--          seed placement so all 100 subsequent build/shape/paint ops are proven
+--          at true distance. Block comment corrected (was wrong "NO teleport").
 --  v4.6.4  Deposit tab revamp (doc-aligned)
 --  v4.6.3  Deposit tab patch (vault stash, Build kick, spread init)
 --  v4.6.2  Deposit tab fixes (anchor order, flood check)
@@ -1545,7 +1547,7 @@ local function queuePaintBrick(brick, color, material, mode, hrpPos)
             if ev then
                 for _, d in pairs(_paintBatch) do
                     if d.brick and d.brick.Parent then
-                        ev:FireServer(d.brick, Enum.NormalId.Top, d.brick.Position,  -- inf-range: brick pos
+                        ev:FireServer(d.brick, Enum.NormalId.Top, d.hrp,
                             d.mode, d.color, d.material, "")
                     end
                 end
@@ -19355,7 +19357,7 @@ RunService.Heartbeat:Connect(function()
         if S.deleteAuraAdv and (now-S._deleteT)>=S.deleteSpeed then
             S._deleteT=now
             local blk=nearestPart(S.deleteRange)
-            if S._auraEvDelete and blk then S._auraEvDelete:FireServer(blk,blk.Position) end  -- inf-range: pass brick pos, not hrp
+            if S._auraEvDelete and blk then S._auraEvDelete:FireServer(blk,hrp.Position) end
         end
         -- ── Property Aura ─────────────────────────────────────────────────
         -- Finds nearest brick whose property doesn't match the target mode,
