@@ -813,6 +813,22 @@ local CT_NORM_VEC = {
     [Enum.NormalId.Right]  = Vector3.new( 1, 0, 0),
 }
 
+-- Returns the NormalId of `brick`'s face whose world-space normal points
+-- most toward the player (HumanoidRootPart).  Used by Size Aura, Spray Aura,
+-- and Face-Build Aura when face mode is "Aim At Player".
+local function getAimAtPlayerFace(brick, hrp)
+    local delta = hrp.Position - brick.Position
+    if delta.Magnitude < 0.001 then return Enum.NormalId.Front end
+    local toPlayer = delta.Unit
+    local bestFace, bestDot = Enum.NormalId.Front, -math.huge
+    for face, localNorm in pairs(CT_NORM_VEC) do
+        local worldNorm = brick.CFrame:VectorToWorldSpace(localNorm)
+        local dot = worldNorm:Dot(toPlayer)
+        if dot > bestDot then bestDot = dot; bestFace = face end
+    end
+    return bestFace
+end
+
 local function _attachMoveHandles()
     if not S._previewAnchor then return end
     if S._previewHandles then
@@ -1222,6 +1238,20 @@ S = {
     _kbConn=nil, _toxicConns={},
     _infJumpConn=nil,
     _auraEvBuild=nil, _auraEvSign=nil, _auraEvPaint=nil, _auraEvDelete=nil,
+    -- ── Auto-Paint Bricks (OP, workspace-wide) ──────────────────────────────
+    autoPaintBricks=false,
+    autoPaintColor=Color3.fromRGB(255,0,200), autoPaintMat="plastic",
+    autoPaintSpeed=0.005,
+    -- ── Auto-Property Bricks (OP, workspace-wide) ───────────────────────────
+    autoPropBricks=false, autoPropMode="anchor", autoPropSpeed=0.005,
+    -- ── Size Aura ────────────────────────────────────────────────────────────
+    sizeAura=false, sizeAuraFace="Random", sizeAuraMode="decrease",
+    sizeAuraDelta=2, sizeAuraRange=20, sizeAuraSpeed=0.05,
+    _sizeAuraT=0, _auraEvSize=nil,
+    -- ── Advanced Face-Build Aura ─────────────────────────────────────────────
+    faceBuildAura=false, faceBuildFace="Random",
+    faceBuildRange=20, faceBuildSpeed=0.05,
+    _faceBuildT=0, _auraEvFaceBuild=nil,
     _killCurBrick=nil, _killListening=false,
     -- ── Inf-BFS seeder ──────────────────────────────────────────────────────────
     seeder       = nil,    -- BasePart | nil   -  the world-brick BFS starts from
@@ -6248,6 +6278,110 @@ do
             end
         end)
     end)
+
+    -- ── Auto-Paint Bricks ────────────────────────────────────────────────────
+    do
+        local apInner = makeToggleSection(g, "Auto-Paint Bricks", function(on)
+            S.autoPaintBricks = on
+            if not on then return end
+            task.spawn(function()
+                while S.autoPaintBricks do
+                    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                    local ev  = getToolRemote("Paint")
+                    if ev and hrp then
+                        local paCol = S.autoPaintColor
+                        local tgtMat = S.autoPaintMat
+                        for _, v in pairs(Workspace:GetDescendants()) do
+                            if not S.autoPaintBricks then break end
+                            if v.Name == "Brick" and v:IsA("BasePart") then
+                                -- Skip bricks that already match both color and material
+                                local blkMatStr = MAT_TO_STR[v.Material] or ""
+                                local dc = Vector3.new(v.Color.R-paCol.R, v.Color.G-paCol.G, v.Color.B-paCol.B)
+                                local colorMatch = dc.Magnitude < 0.015
+                                local matMatch   = (blkMatStr == tgtMat)
+                                if not (colorMatch and matMatch) then
+                                    pcall(function()
+                                        ev:FireServer(v, Enum.NormalId.Top, hrp.Position,
+                                            HANDSHAKE, paCol, "color+material", "")
+                                    end)
+                                    task.wait(S.autoPaintSpeed)
+                                end
+                            end
+                        end
+                    end
+                    task.wait(0.1)
+                end
+            end)
+        end)
+        -- Color picker row
+        local apRow = Instance.new("Frame"); apRow.Size = UDim2.new(1,0,0,20)
+        apRow.BackgroundTransparency = 1; apRow.ZIndex = 8; apRow.Parent = apInner
+        local apLbl = Instance.new("TextLabel"); apLbl.Size = UDim2.new(0,80,1,0)
+        apLbl.Position = UDim2.new(0,4,0,0); apLbl.BackgroundTransparency = 1
+        apLbl.Text = "Paint Color"; apLbl.TextColor3 = T.WHITE
+        apLbl.FontFace = FONT_MAIN; apLbl.TextSize = 12
+        apLbl.TextXAlignment = Enum.TextXAlignment.Left; apLbl.ZIndex = 9; apLbl.Parent = apRow
+        onTheme(function(th) apLbl.TextColor3 = th.WHITE end)
+        local apSwatch = Instance.new("Frame"); apSwatch.Size = UDim2.new(0,20,0,16)
+        apSwatch.Position = UDim2.new(0,86,0.5,-8); apSwatch.BackgroundColor3 = S.autoPaintColor
+        apSwatch.BorderColor3 = T.BORDER; apSwatch.ZIndex = 9; apSwatch.Parent = apRow
+        onTheme(function(th) apSwatch.BorderColor3 = th.BORDER end)
+        local apPickBtn = Instance.new("TextButton"); apPickBtn.Size = UDim2.new(0,40,0,16)
+        apPickBtn.Position = UDim2.new(0,110,0.5,-8); apPickBtn.BackgroundColor3 = T.BTN
+        apPickBtn.BorderColor3 = T.BORDER; apPickBtn.Text = "Pick"
+        apPickBtn.TextColor3 = T.WHITE; apPickBtn.FontFace = FONT_MAIN; apPickBtn.TextSize = 11
+        apPickBtn.ZIndex = 9; apPickBtn.Parent = apRow
+        onTheme(function(th) apPickBtn.BackgroundColor3=th.BTN; apPickBtn.BorderColor3=th.BORDER; apPickBtn.TextColor3=th.WHITE end)
+        apPickBtn.MouseButton1Click:Connect(function()
+            openColorPicker(function(c) S.autoPaintColor = c; apSwatch.BackgroundColor3 = c end)
+        end)
+        makeDropdown(apInner, "Material",
+            {"smooth","plastic","tiles","bricks","planks","ice","neon","toxic","grass","sand","snow","glass","wood","stone","concrete"},
+            "plastic", function(v) S.autoPaintMat = v end)
+        makeInput(apInner, "Speed (s/brick)", "0.005", function(v) S.autoPaintSpeed = tonumber(v) or 0.005 end)
+        makeSection(apInner, "Skips bricks already matching the chosen color & material.")
+    end
+
+    -- ── Auto-Property Bricks ─────────────────────────────────────────────────
+    do
+        local appInner = makeToggleSection(g, "Auto-Property Bricks", function(on)
+            S.autoPropBricks = on
+            if not on then return end
+            task.spawn(function()
+                while S.autoPropBricks do
+                    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                    local ev  = getToolRemote("Paint")
+                    if ev and hrp then
+                        local mode = S.autoPropMode
+                        for _, v in pairs(Workspace:GetDescendants()) do
+                            if not S.autoPropBricks then break end
+                            if v.Name == "Brick" and v:IsA("BasePart") then
+                                local needsChange = false
+                                if     mode == "anchor"    and not v.Anchored   then needsChange = true
+                                elseif mode == "unanchor"  and v.Anchored       then needsChange = true
+                                elseif mode == "collide"   and not v.CanCollide then needsChange = true
+                                elseif mode == "nocollide" and v.CanCollide     then needsChange = true
+                                end
+                                if needsChange then
+                                    local remMode = (mode == "anchor" or mode == "unanchor") and "anchor" or "collide"
+                                    pcall(function()
+                                        ev:FireServer(v, Enum.NormalId.Front, hrp.Position,
+                                            HANDSHAKE, Color3.new(1,1,1), remMode, "")
+                                    end)
+                                    task.wait(S.autoPropSpeed)
+                                end
+                            end
+                        end
+                    end
+                    task.wait(0.1)
+                end
+            end)
+        end)
+        makeDropdown(appInner, "Mode", {"anchor","unanchor","collide","nocollide"}, "anchor",
+            function(v) S.autoPropMode = v end)
+        makeInput(appInner, "Speed (s/brick)", "0.005", function(v) S.autoPropSpeed = tonumber(v) or 0.005 end)
+        makeSection(appInner, "Skips bricks that already fulfil the chosen property.")
+    end
     makeToggle(g,"Void Aura",function(on)
         S.voidAura=on
         task.spawn(function()
@@ -6379,6 +6513,40 @@ do  -- ── Spray Aura ──────────────────�
     makeSection(sprayInner,"Random = picks a different face per brick each tick.")
     makeInput(sprayInner,"Range","20",function(v) S.sprayAuraRange=tonumber(v) or 20 end)
     makeInput(sprayInner,"Speed","0.05",function(v) S.sprayAuraSpeed=tonumber(v) or 0.05 end)
+end
+
+-- ── Size Aura ─────────────────────────────────────────────────────────────
+do
+    local g = makeGroup(aurasPage, "Size Aura",
+        "Applies Shape-tool increase/decrease to bricks in range. Face = which side to push. Delta = how many times per brick per tick.")
+
+    local szInner = makeToggleSection(g, "Size Aura", function(on) S.sizeAura = on end)
+
+    makeDropdown(szInner, "Mode",  {"decrease","increase"}, "decrease",
+        function(v) S.sizeAuraMode = v end)
+    makeDropdown(szInner, "Face",
+        {"Random","Top","Bottom","Front","Back","Left","Right","Aim At Player"}, "Random",
+        function(v) S.sizeAuraFace = v end)
+    makeInput(szInner, "Delta (ops/brick)", "2",
+        function(v) S.sizeAuraDelta = math.max(1, math.floor(tonumber(v) or 2)) end)
+    makeInput(szInner, "Range",  "20",   function(v) S.sizeAuraRange = tonumber(v) or 20  end)
+    makeInput(szInner, "Speed",  "0.05", function(v) S.sizeAuraSpeed = tonumber(v) or 0.05 end)
+    makeSection(szInner, "Aim At Player = targets the face of each brick that faces toward you.")
+end
+
+-- ── Advanced Face-Build Aura ──────────────────────────────────────────────
+do
+    local g = makeGroup(aurasPage, "Face-Build Aura",
+        "Builds new bricks onto faces of existing bricks in range — creates a cascade/wave effect. Uses the Build tool remote.")
+
+    local fbInner = makeToggleSection(g, "Face-Build Aura", function(on) S.faceBuildAura = on end)
+
+    makeDropdown(fbInner, "Face",
+        {"Random","Top","Bottom","Front","Back","Left","Right","Aim At Player"}, "Random",
+        function(v) S.faceBuildFace = v end)
+    makeInput(fbInner, "Range",  "20",   function(v) S.faceBuildRange = tonumber(v) or 20  end)
+    makeInput(fbInner, "Speed",  "0.05", function(v) S.faceBuildSpeed = tonumber(v) or 0.05 end)
+    makeSection(fbInner, "Aim At Player = builds off the brick face visible from your position.")
 end
 
 -- ═══════════════════════════════════════════════════════════════
@@ -19260,7 +19428,7 @@ RunService.Heartbeat:Connect(function()
         end
     end
 
-    if hrp and (S.buildAura or S.signAura or S.paintAura or S.deleteAuraAdv or S.propAura) then
+    if hrp and (S.buildAura or S.signAura or S.paintAura or S.deleteAuraAdv or S.propAura or S.sizeAura or S.faceBuildAura) then
         S.auraH=(S.auraH+S.auraRainbowSpeed)%1
         local col=Color3.fromHSV(S.auraH,1,1)
         local now=tick()
@@ -19376,9 +19544,101 @@ RunService.Heartbeat:Connect(function()
         else
             S._auraEvProp = nil
         end
+
+        -- ── Size Aura ──────────────────────────────────────────────────────────
+        -- Fires the Shape remote on bricks in range, optionally on the face that
+        -- aims toward the player.  Delta controls how many ops per brick per tick.
+        if S.sizeAura then
+            if not S._auraEvSize then
+                local t = forceEquip("Shape")
+                if t then
+                    local sc = t:FindFirstChild("Script")
+                    S._auraEvSize = sc and sc:FindFirstChild("Event")
+                end
+            end
+            if S._auraEvSize and not S._auraEvSize.Parent then S._auraEvSize = nil end
+            if S._auraEvSize and (now - S._sizeAuraT) >= S.sizeAuraSpeed then
+                S._sizeAuraT = now
+                local pos = hrp.Position
+                local _szFaceMap = {
+                    Top=Enum.NormalId.Top, Bottom=Enum.NormalId.Bottom,
+                    Front=Enum.NormalId.Front, Back=Enum.NormalId.Back,
+                    Left=Enum.NormalId.Left, Right=Enum.NormalId.Right,
+                }
+                local fixedFace = _szFaceMap[S.sizeAuraFace]
+                local batched = 0
+                for _, obj in ipairs(Workspace:GetDescendants()) do
+                    if batched >= 5 then break end
+                    if obj:IsA("BasePart") and (obj.Position - pos).Magnitude <= S.sizeAuraRange then
+                        local face
+                        if S.sizeAuraFace == "Aim At Player" then
+                            face = getAimAtPlayerFace(obj, hrp)
+                        elseif S.sizeAuraFace == "Random" then
+                            face = ALL_SIDES_E[math.random(#ALL_SIDES_E)]
+                        else
+                            face = fixedFace
+                        end
+                        if face then
+                            for _ = 1, S.sizeAuraDelta do
+                                pcall(function()
+                                    S._auraEvSize:FireServer(obj, face, obj.Position, S.sizeAuraMode)
+                                end)
+                            end
+                            batched = batched + 1
+                        end
+                    end
+                end
+            end
+        else
+            S._auraEvSize = nil
+        end
+
+        -- ── Advanced Face-Build Aura ───────────────────────────────────────────
+        -- Finds a brick in range and fires the Build remote on one of its faces,
+        -- which attaches a new brick to that face — creating a cascade wave effect.
+        if S.faceBuildAura then
+            if not S._auraEvFaceBuild then
+                local t = forceEquip("Build")
+                S._auraEvFaceBuild = t and t:FindFirstChild("Event", true)
+            end
+            if S._auraEvFaceBuild and not S._auraEvFaceBuild.Parent then S._auraEvFaceBuild = nil end
+            if S._auraEvFaceBuild and (now - S._faceBuildT) >= S.faceBuildSpeed then
+                S._faceBuildT = now
+                local pos = hrp.Position
+                local _fbFaceMap = {
+                    Top=Enum.NormalId.Top, Bottom=Enum.NormalId.Bottom,
+                    Front=Enum.NormalId.Front, Back=Enum.NormalId.Back,
+                    Left=Enum.NormalId.Left, Right=Enum.NormalId.Right,
+                }
+                local fixedFace = _fbFaceMap[S.faceBuildFace]
+                local folder = getBricksFolder() or Workspace
+                for _, obj in ipairs(folder:GetDescendants()) do
+                    if obj:IsA("BasePart") and obj.Name == "Brick"
+                    and (obj.Position - pos).Magnitude <= S.faceBuildRange then
+                        local face
+                        if S.faceBuildFace == "Aim At Player" then
+                            face = getAimAtPlayerFace(obj, hrp)
+                        elseif S.faceBuildFace == "Random" then
+                            face = ALL_SIDES_E[math.random(#ALL_SIDES_E)]
+                        else
+                            face = fixedFace
+                        end
+                        if face then
+                            pcall(function()
+                                S._auraEvFaceBuild:FireServer(obj, face, obj.Position, "normal")
+                            end)
+                        end
+                        break  -- one brick per tick → wave propagates naturally
+                    end
+                end
+            end
+        else
+            S._auraEvFaceBuild = nil
+        end
+
     else
         S._auraEvBuild=nil; S._auraEvSign=nil; S._auraEvPaint=nil; S._auraEvDelete=nil
-        S._auraEvProp=nil
+        S._auraEvProp=nil; S._auraEvSize=nil; S._auraEvFaceBuild=nil
     end
 end)
 
