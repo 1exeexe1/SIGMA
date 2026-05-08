@@ -1241,7 +1241,7 @@ S = {
     -- ── Auto-Paint Bricks (OP, workspace-wide) ──────────────────────────────
     autoPaintBricks=false,
     autoPaintColor=Color3.fromRGB(255,0,200), autoPaintMat="plastic",
-    autoPaintSpeed=0.005,
+    autoPaintSpeed=0.005, autoPaintOnlyColor=false, autoPaintOnlyMat=false,
     -- ── Auto-Property Bricks (OP, workspace-wide) ───────────────────────────
     autoPropBricks=false, autoPropMode="anchor", autoPropSpeed=0.005,
     -- ── Size Aura ────────────────────────────────────────────────────────────
@@ -6294,15 +6294,22 @@ do
                         for _, v in pairs(Workspace:GetDescendants()) do
                             if not S.autoPaintBricks then break end
                             if v.Name == "Brick" and v:IsA("BasePart") then
-                                -- Skip bricks that already match both color and material
+                                -- Smart skip: only process bricks that need changing
                                 local blkMatStr = MAT_TO_STR[v.Material] or ""
                                 local dc = Vector3.new(v.Color.R-paCol.R, v.Color.G-paCol.G, v.Color.B-paCol.B)
                                 local colorMatch = dc.Magnitude < 0.015
                                 local matMatch   = (blkMatStr == tgtMat)
-                                if not (colorMatch and matMatch) then
+                                local skip = (S.autoPaintOnlyColor and colorMatch)
+                                          or (S.autoPaintOnlyMat   and matMatch)
+                                          or (not S.autoPaintOnlyColor and not S.autoPaintOnlyMat
+                                              and colorMatch and matMatch)
+                                if not skip then
+                                    local remMode = S.autoPaintOnlyColor and "color"
+                                                 or S.autoPaintOnlyMat   and "material"
+                                                 or HANDSHAKE
                                     pcall(function()
                                         ev:FireServer(v, Enum.NormalId.Top, hrp.Position,
-                                            HANDSHAKE, paCol, "color+material", "")
+                                            remMode, paCol, tgtMat, "")
                                     end)
                                     task.wait(S.autoPaintSpeed)
                                 end
@@ -6338,8 +6345,10 @@ do
         makeDropdown(apInner, "Material",
             {"smooth","plastic","tiles","bricks","planks","ice","neon","toxic","grass","sand","snow","glass","wood","stone","concrete"},
             "plastic", function(v) S.autoPaintMat = v end)
+        makeToggle(apInner, "Only Color",    function(on) S.autoPaintOnlyColor=on; if on then S.autoPaintOnlyMat=false   end end)
+        makeToggle(apInner, "Only Material", function(on) S.autoPaintOnlyMat=on;   if on then S.autoPaintOnlyColor=false end end)
         makeInput(apInner, "Speed (s/brick)", "0.005", function(v) S.autoPaintSpeed = tonumber(v) or 0.005 end)
-        makeSection(apInner, "Skips bricks already matching the chosen color & material.")
+        makeSection(apInner, "Skips bricks already matching. Both off = apply color AND material.")
     end
 
     -- ── Auto-Property Bricks ─────────────────────────────────────────────────
@@ -6366,7 +6375,7 @@ do
                                     local remMode = (mode == "anchor" or mode == "unanchor") and "anchor" or "collide"
                                     pcall(function()
                                         ev:FireServer(v, Enum.NormalId.Front, hrp.Position,
-                                            HANDSHAKE, Color3.new(1,1,1), remMode, "")
+                                            HANDSHAKE, v.Color, remMode, "")
                                     end)
                                     task.wait(S.autoPropSpeed)
                                 end
@@ -6520,7 +6529,58 @@ do
     local g = makeGroup(aurasPage, "Size Aura",
         "Applies Shape-tool increase/decrease to bricks in range. Face = which side to push. Delta = how many times per brick per tick.")
 
-    local szInner = makeToggleSection(g, "Size Aura", function(on) S.sizeAura = on end)
+    local szInner = makeToggleSection(g, "Size Aura", function(on)
+        S.sizeAura = on
+        if not on then return end
+        task.spawn(function()
+            local _szEv
+            while S.sizeAura do
+                local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                if not _szEv or not _szEv.Parent then
+                    local t = forceEquip("Shape")
+                    if t then
+                        local sc = t:FindFirstChild("Script")
+                        _szEv = sc and sc:FindFirstChild("Event")
+                    end
+                end
+                if _szEv and hrp then
+                    local pos = hrp.Position
+                    local _szFaceMap = {
+                        Top=Enum.NormalId.Top,    Bottom=Enum.NormalId.Bottom,
+                        Front=Enum.NormalId.Front, Back=Enum.NormalId.Back,
+                        Left=Enum.NormalId.Left,   Right=Enum.NormalId.Right,
+                    }
+                    local fixedFace = _szFaceMap[S.sizeAuraFace]
+                    local batched = 0
+                    for _, obj in ipairs(Workspace:GetDescendants()) do
+                        if not S.sizeAura then break end
+                        if batched >= 5 then break end
+                        if obj:IsA("BasePart") and (obj.Position - pos).Magnitude <= S.sizeAuraRange then
+                            local face
+                            if S.sizeAuraFace == "Aim At Player" then
+                                face = getAimAtPlayerFace(obj, hrp)
+                            elseif S.sizeAuraFace == "Random" then
+                                face = ALL_SIDES_E[math.random(#ALL_SIDES_E)]
+                            else
+                                face = fixedFace
+                            end
+                            if face then
+                                for _ = 1, S.sizeAuraDelta do
+                                    if not S.sizeAura then break end
+                                    pcall(function()
+                                        _szEv:FireServer(obj, face, obj.Position, S.sizeAuraMode)
+                                    end)
+                                    task.wait(0.02)  -- throttle ops to avoid rate-limiting
+                                end
+                                batched = batched + 1
+                            end
+                        end
+                    end
+                end
+                task.wait(S.sizeAuraSpeed)
+            end
+        end)
+    end)
 
     makeDropdown(szInner, "Mode",  {"decrease","increase"}, "decrease",
         function(v) S.sizeAuraMode = v end)
