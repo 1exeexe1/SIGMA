@@ -18837,6 +18837,9 @@ local _rlLoopOn     = false
 local _rlLoopDelay  = 1.0   -- seconds between runs
 local _rlLoopThread = nil
 
+-- Forward declaration (assigned later; kept local to avoid _G leak)
+local _rlRebuildList
+
 -- Panel base size (normal)  ─  ~1/8 screen area ─────────────
 -- 320×280 ≈ 320×280 = 89600 px²; a 1920×1080 screen = 2073600 px², 89600/2073600 ≈ 4.3%
 -- At 1/8 of screen we target width≈320, height≈280; fine on both PC and mobile.
@@ -18848,7 +18851,7 @@ local _RL_EXP_H = math.floor(_RL_H * _RL_EXP_SCALE)
 -- Colors
 local _RL_COL_EVENT   = Color3.fromRGB(255, 220, 60)   -- yellow  – RemoteEvent
 local _RL_COL_REMOTE  = Color3.fromRGB(255, 140, 30)   -- orange  – RemoteFunction / Unreliable
-local _RL_COL_SEL     = Color3.fromRGB(80, 80, 130)    -- selected row bg
+local _RL_COL_SEL     = Color3.fromRGB(80, 80, 130)    -- selected row bg (used in _rlRebuildListImpl)
 
 -- ── helpers ──────────────────────────────────────────────────
 local function _rlRemoteColor(rtype)
@@ -18883,7 +18886,8 @@ local function _rlGenScript(remote, args)
         end
         argsStr = table.concat(parts, ", ")
     end
-    local rClass = pcall(function() return remote.ClassName end) and remote.ClassName or "RemoteEvent"
+    local _clsOk, rClass = pcall(function() return remote.ClassName end)
+    if not _clsOk then rClass = "RemoteEvent" end
     local method = (rClass == "RemoteFunction") and "InvokeServer" or "FireServer"
     if argsStr == "" then
         return string.format("game.%s:%s()", path, method)
@@ -18897,13 +18901,14 @@ end
 -- Only active when S.rlActive == true.
 local _rlOriginalNamecall = nil
 local _rlHookActive = false
-local _rlHookConn   = nil  -- for cleanup
 
 local function _rlMaybeLog(remote, method, args)
     if not S.rlActive then return end
-    local rClass = pcall(function() return remote.ClassName end) and remote.ClassName or ""
+    local _clsOk, rClass = pcall(function() return remote.ClassName end)
+    if not _clsOk then rClass = "" end
     if not (rClass == "RemoteEvent" or rClass == "RemoteFunction" or rClass == "UnreliableRemoteEvent") then return end
-    local name = pcall(function() return remote.Name end) and remote.Name or "???"
+    local _nmOk, name = pcall(function() return remote.Name end)
+    if not _nmOk then name = "???" end
     if _rlBlacklist[name] then return end
     -- Soft dedup: same remote name within the same second → skip
     local now = tick()
@@ -18965,8 +18970,8 @@ local function _rlDisableHook()
     _rlHookActive = false
 end
 
--- forward-declare rebuild (used by hook above)
-_rlRebuildList = function() end   -- will be replaced below
+-- forward-declare stub (used by hook above; local declared in state block above)
+_rlRebuildList = function() end
 
 -- ── Panel construction ────────────────────────────────────────
 local function _rlCollapseCode()
@@ -19022,7 +19027,7 @@ local function _rlRebuildListImpl()
         local rowCol = _rlRemoteColor(e.remoteType)
         local row = Instance.new("TextButton")
         row.Size = UDim2.new(1,-4,0,28)
-        row.BackgroundColor3 = Color3.fromRGB(18,18,26)
+        row.BackgroundColor3 = (e == _rlSelected) and _RL_COL_SEL or Color3.fromRGB(18,18,26)
         row.BorderColor3 = rowCol
         row.BorderSizePixel = 1
         row.Text = ""; row.ZIndex = 52; row.Parent = _rlScroll
@@ -19093,6 +19098,7 @@ local function _rlBuildPanel()
     onTheme(function(th) pStroke.Color = th.ACCENT end)
 
     -- Title bar (also drag handle)
+    do
     local tb = Instance.new("Frame", _rlPanel)
     tb.Name = "TitleBar"
     tb.Size = UDim2.new(1,0,0,24); tb.BackgroundColor3 = Color3.fromRGB(16,16,20); tb.BorderSizePixel = 0; tb.ZIndex = 51
@@ -19120,8 +19126,10 @@ local function _rlBuildPanel()
         _rlPanel.Visible = false; _rlVisible = false
         _rlCollapseCode()
     end)
+    end -- title bar
 
     -- Header strip (count + clear)
+    do
     local hdr = Instance.new("Frame", _rlPanel)
     hdr.Size = UDim2.new(1,0,0,18); hdr.Position = UDim2.new(0,0,0,24)
     hdr.BackgroundColor3 = Color3.fromRGB(14,14,20); hdr.BorderSizePixel = 0; hdr.ZIndex = 51
@@ -19140,6 +19148,16 @@ local function _rlBuildPanel()
         _rlEntries = {}; _rlSeen = {}; _rlCollapseCode(); _rlRebuildList()
         countLbl.Text = "0 remotes captured"
     end)
+    -- Count updater (kept inside do-block: captures countLbl upvalue cleanly)
+    task.spawn(function()
+        while _rlPanel and _rlPanel.Parent do
+            task.wait(2)
+            if countLbl and countLbl.Parent then
+                countLbl.Text = #_rlEntries.." remote"..(#_rlEntries ~= 1 and "s" or "").." captured"
+            end
+        end
+    end)
+    end -- header strip
 
     -- Scroll list (normal view)
     _rlScroll = Instance.new("ScrollingFrame", _rlPanel)
@@ -19152,10 +19170,13 @@ local function _rlBuildPanel()
     _rlScroll.CanvasSize = UDim2.new(0,0,0,0)
     _rlScroll.ZIndex = 51; _rlScroll.Visible = true
     onTheme(function(th) _rlScroll.ScrollBarImageColor3 = th.ACCENT end)
+    -- Scroll list (normal view)
+    do
     local sll = Instance.new("UIListLayout", _rlScroll)
     sll.Padding = UDim.new(0,3); sll.SortOrder = Enum.SortOrder.LayoutOrder
     local slp = Instance.new("UIPadding", _rlScroll)
     slp.PaddingTop = UDim.new(0,3); slp.PaddingLeft = UDim.new(0,2); slp.PaddingRight = UDim.new(0,2)
+    end -- scroll list setup
 
     -- Code view (expanded state)
     _rlCodeFrame = Instance.new("Frame", _rlPanel)
@@ -19164,6 +19185,8 @@ local function _rlBuildPanel()
     _rlCodeFrame.Position = UDim2.new(0,0,0,42)
     _rlCodeFrame.BackgroundColor3 = Color3.fromRGB(8,8,12); _rlCodeFrame.BorderSizePixel = 0
     _rlCodeFrame.ZIndex = 51; _rlCodeFrame.Visible = false
+    -- Code view (expanded state) — all locals are internal; _rlExpandCode reads by FindFirstChild
+    do
     local cvLayout = Instance.new("UIListLayout", _rlCodeFrame)
     cvLayout.Padding = UDim.new(0,3); cvLayout.SortOrder = Enum.SortOrder.LayoutOrder
     local cvPad = Instance.new("UIPadding", _rlCodeFrame)
@@ -19255,20 +19278,12 @@ local function _rlBuildPanel()
             _rlCollapseCode()
         end
     end)
+    end -- code view
 
-    -- Count updater
-    task.spawn(function()
-        while _rlPanel and _rlPanel.Parent do
-            task.wait(2)
-            if countLbl and countLbl.Parent then
-                countLbl.Text = #_rlEntries.." remote"..(#_rlEntries ~= 1 and "s" or "").." captured"
-            end
-        end
-    end)
-
-    -- Drag (via title bar)
+    -- Drag (via title bar — resolved by name since tb is scoped to its do-block)
     do
         local dragStart, panStart
+        local tb = _rlPanel:FindFirstChild("TitleBar")
         tb.InputBegan:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
                 dragStart = i.Position; panStart = _rlPanel.Position
@@ -19404,8 +19419,8 @@ makeSection(gamePage, "Loop Code")
 local g2 = makeGroup(gamePage, "Loop Selected Remote",
     "Repeatedly fires the currently selected remote (from the Logger panel) at the interval below. Select a remote first by tapping it in the Logger, then enable Loop Code.")
 
-local _loopTogRow, _loopTickRef
-_loopTogRow, _loopTickRef = makeToggle(g2, "Loop Code", function(on)
+local _, _loopTickRef
+_, _loopTickRef = makeToggle(g2, "Loop Code", function(on)
     _rlLoopOn = on
     if on then
         if not _rlSelected then
