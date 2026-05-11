@@ -1285,6 +1285,9 @@ S = {
     _decalCensored    = {},     -- [label] = {orig_image, orig_text}   -  save for restore
     _decalHBConn      = nil,
     _decalLogEntries  = {},     -- [{id,name,owner,time}]   -  live decal ID log
+    -- ── Remote Logger (Game tab) ──────────────────────────────────────────────────
+    rlActive          = false,  -- remote logger hook active
+    rlAutoStart       = false,  -- auto-start hook on deploy
     -- ── Multi-Chat ────────────────────────────────────────────────────────────────
     multiChat         = false,  -- extra chat input panels enabled
     multiChatCount    = 1,      -- how many extra bars (1–4)
@@ -2663,13 +2666,19 @@ local antiPage     = _antiSubs["Anti"]
 local punishPage   = _antiSubs["Punish"]
 
 -- ── BIG TAB 5: Target ────────────────────────────────────────
---   Sub-tabs: Target | Boombox | Decal | Scripts
+--   Sub-tabs: Target | Boombox | Decal | Game
 local _targetBigPage = createTab("Target", 5)
-local _targetSubs    = makeSubTabBar(_targetBigPage, {"Target","Boombox","Decal","Scripts"})
+local _targetSubs    = makeSubTabBar(_targetBigPage, {"Target","Boombox","Decal","Game"})
 local targetPage     = _targetSubs["Target"]
 local boomboxPage    = _targetSubs["Boombox"]
 local decalPage      = _targetSubs["Decal"]
-local scriptsPage    = _targetSubs["Scripts"]
+local gamePage       = _targetSubs["Game"]
+
+-- ── BIG TAB 9: Scripts ────────────────────────────────────────
+--   Scripts moved out of Target to make room for Game subtab
+local _scriptsBigPage = createTab("Scripts", 9)
+local _scriptsSubs    = makeSubTabBar(_scriptsBigPage, {"Scripts"})
+local scriptsPage     = _scriptsSubs["Scripts"]
 
 -- ── BIG TAB 6: Deposits ──────────────────────────────────────
 --   Sub-tabs: Deposits (standalone, no siblings needed yet)
@@ -18125,14 +18134,62 @@ do
     if S._boomboxHBConn then S._boomboxHBConn:Disconnect() end
     S._boomboxHBConn = RunService.Heartbeat:Connect(_bbTickWithLog)
 
+    -- ── Boombox bubble toggle ─────────────────────────────────────
+    -- Square drag-anywhere bubble (B) mirrors the main panel bubble style
+    local _bbBubble = Instance.new("TextButton")
+    _bbBubble.Name = "BoomboxBubble"
+    _bbBubble.Size = UDim2.new(0,26,0,26)
+    _bbBubble.Position = UDim2.new(0.5,-13,0,46)  -- below main bubble
+    _bbBubble.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    _bbBubble.Text = ""; _bbBubble.ZIndex = 15; _bbBubble.Parent = ScreenGui
+    _bbBubble.Draggable = false  -- manual drag like panel bubble
+    local _bbBubStroke = Instance.new("UIStroke", _bbBubble)
+    _bbBubStroke.Color = Color3.fromRGB(255,165,0); _bbBubStroke.Thickness = 1.5
+    TweenService:Create(_bbBubStroke, TweenInfo.new(1.2,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true), {Thickness=2.5}):Play()
+    local _bbBubLbl = Instance.new("TextLabel", _bbBubble)
+    _bbBubLbl.Size = UDim2.new(1,0,1,0); _bbBubLbl.BackgroundTransparency = 1
+    _bbBubLbl.Text = "B"; _bbBubLbl.TextColor3 = Color3.fromRGB(255,165,0)
+    _bbBubLbl.FontFace = FONT_MAIN; _bbBubLbl.TextSize = 11; _bbBubLbl.ZIndex = 16
+    -- Bubble drag
+    do
+        local _bbBubDragStart, _bbBubPanStart
+        _bbBubble.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                _bbBubDragStart = i.Position; _bbBubPanStart = _bbBubble.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(i)
+            if _bbBubDragStart and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - _bbBubDragStart
+                _bbBubble.Position = UDim2.new(_bbBubPanStart.X.Scale, _bbBubPanStart.X.Offset+d.X, _bbBubPanStart.Y.Scale, _bbBubPanStart.Y.Offset+d.Y)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                local moved = _bbBubDragStart and (i.Position - _bbBubDragStart).Magnitude < 6
+                _bbBubDragStart = nil
+                if moved then
+                    _bbLogBuildPanel()
+                    _bbLogVisible = not _bbLogVisible
+                    _bbLogPanel.Visible = _bbLogVisible
+                    if _bbLogVisible then _bbLogRebuildRows() end
+                    _bbBubStroke.Color = _bbLogVisible and T.ACCENT or Color3.fromRGB(255,165,0)
+                    _bbBubLbl.TextColor3 = _bbBubStroke.Color
+                end
+            end
+        end)
+    end
+
     local g = makeGroup(boomboxPage, "Boombox ID Logger",
-        "Opens a live panel showing every song detected: name, ID, duration, owner. Auto-resolves names via MarketplaceService.")
-    makeButton(g, "Open Boombox ID Logger", function()
+        "Opens a live panel showing every song detected: name, ID, duration, owner. Auto-resolves names via MarketplaceService. Also togglable via the orange B bubble.")
+    makeButton(g, "Open / Toggle Boombox Logger", function()
         _bbLogBuildPanel()
-        _bbLogVisible = true
-        _bbLogPanel.Visible = true
-        _bbLogRebuildRows()
-        notify("Boombox", "ID Logger opened.")
+        _bbLogVisible = not _bbLogVisible
+        _bbLogPanel.Visible = _bbLogVisible
+        if _bbLogVisible then _bbLogRebuildRows() end
+        _bbBubStroke.Color = _bbLogVisible and T.ACCENT or Color3.fromRGB(255,165,0)
+        _bbBubLbl.TextColor3 = _bbBubStroke.Color
+        notify("Boombox", _bbLogVisible and "Logger opened." or "Logger hidden.")
     end)
 end
 
@@ -18697,20 +18754,743 @@ do
 end
 
 do
+    -- ── Decal bubble toggle ────────────────────────────────────────
+    local _dcBubble = Instance.new("TextButton")
+    _dcBubble.Name = "DecalBubble"
+    _dcBubble.Size = UDim2.new(0,26,0,26)
+    _dcBubble.Position = UDim2.new(0.5,-13,0,78)  -- below BB bubble
+    _dcBubble.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    _dcBubble.Text = ""; _dcBubble.ZIndex = 15; _dcBubble.Parent = ScreenGui
+    local _dcBubStroke = Instance.new("UIStroke", _dcBubble)
+    _dcBubStroke.Color = Color3.fromRGB(180,100,255); _dcBubStroke.Thickness = 1.5
+    TweenService:Create(_dcBubStroke, TweenInfo.new(1.4,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true), {Thickness=2.5}):Play()
+    local _dcBubLbl = Instance.new("TextLabel", _dcBubble)
+    _dcBubLbl.Size = UDim2.new(1,0,1,0); _dcBubLbl.BackgroundTransparency = 1
+    _dcBubLbl.Text = "D"; _dcBubLbl.TextColor3 = Color3.fromRGB(180,100,255)
+    _dcBubLbl.FontFace = FONT_MAIN; _dcBubLbl.TextSize = 11; _dcBubLbl.ZIndex = 16
+    -- Bubble drag
+    do
+        local _dcBubDragStart, _dcBubPanStart
+        _dcBubble.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                _dcBubDragStart = i.Position; _dcBubPanStart = _dcBubble.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(i)
+            if _dcBubDragStart and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - _dcBubDragStart
+                _dcBubble.Position = UDim2.new(_dcBubPanStart.X.Scale, _dcBubPanStart.X.Offset+d.X, _dcBubPanStart.Y.Scale, _dcBubPanStart.Y.Offset+d.Y)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                local moved = _dcBubDragStart and (i.Position - _dcBubDragStart).Magnitude < 6
+                _dcBubDragStart = nil
+                if moved then
+                    _dcLogBuildPanel()
+                    _dcLogVisible = not _dcLogVisible
+                    _dcLogPanel.Visible = _dcLogVisible
+                    if _dcLogVisible then _dcLogRebuildRows() end
+                    _dcBubStroke.Color = _dcLogVisible and T.ACCENT or Color3.fromRGB(180,100,255)
+                    _dcBubLbl.TextColor3 = _dcBubStroke.Color
+                end
+            end
+        end)
+    end
+
     local g = makeGroup(decalPage, "Decal ID Logger",
-        "Opens a live floating panel that logs every decal detected: name (if available), ID, kind, owner.")
-    makeButton(g, "Open Decal ID Logger", function()
+        "Opens a live floating panel that logs every decal detected: name (if available), ID, kind, owner. Also togglable via the purple D bubble.")
+    makeButton(g, "Open / Toggle Decal Logger", function()
         _dcLogBuildPanel()
-        _dcLogVisible=true; _dcLogPanel.Visible=true
-        _dcLogRebuildRows()
-        notify("Decal","ID Logger opened.")
+        _dcLogVisible = not _dcLogVisible
+        _dcLogPanel.Visible = _dcLogVisible
+        if _dcLogVisible then _dcLogRebuildRows() end
+        _dcBubStroke.Color = _dcLogVisible and T.ACCENT or Color3.fromRGB(180,100,255)
+        _dcBubLbl.TextColor3 = _dcBubStroke.Color
+        notify("Decal", _dcLogVisible and "Logger opened." or "Logger hidden.")
     end)
 end
 
 end -- ╚═ DECAL TAB SCOPE ══╝
 
+-- ══════════════════════════════════════════════════════════════
+-- ── TAB: GAME ─────────────────────────────────────────────────
+--    Remote Logger  •  Loop Code  •  Exclude / Block controls
+--    gamePage: sub-tab inside "Target" big tab
+-- ══════════════════════════════════════════════════════════════
+do -- ╔═ GAME TAB SCOPE ══╗
+
+-- ── State ────────────────────────────────────────────────────
+local _rlEntries    = {}   -- [{name, remoteType, remote, genScript, time}]
+local _rlSeen       = {}   -- name+debugid → true, for soft dedup
+local _rlBlacklist  = {}   -- name → true (exclude)
+local _rlBlocklist  = {}   -- name → true (block fire)
+local _rlPanel      = nil
+local _rlScroll     = nil
+local _rlCodeFrame  = nil  -- code view expansion frame
+local _rlVisible    = false
+local _rlExpanded   = false  -- true = panel is in large code-view mode
+local _rlSelected   = nil  -- currently selected entry index
+
+-- Loop-code state
+local _rlLoopOn     = false
+local _rlLoopDelay  = 1.0   -- seconds between runs
+local _rlLoopThread = nil
+
+-- Panel base size (normal)  ─  ~1/8 screen area ─────────────
+-- 320×280 ≈ 320×280 = 89600 px²; a 1920×1080 screen = 2073600 px², 89600/2073600 ≈ 4.3%
+-- At 1/8 of screen we target width≈320, height≈280; fine on both PC and mobile.
+local _RL_W, _RL_H   = 320, 280
+local _RL_EXP_SCALE  = 1.8   -- expansion factor when an entry is selected
+local _RL_EXP_W = math.floor(_RL_W * _RL_EXP_SCALE)
+local _RL_EXP_H = math.floor(_RL_H * _RL_EXP_SCALE)
+
+-- Colors
+local _RL_COL_EVENT   = Color3.fromRGB(255, 220, 60)   -- yellow  – RemoteEvent
+local _RL_COL_REMOTE  = Color3.fromRGB(255, 140, 30)   -- orange  – RemoteFunction / Unreliable
+local _RL_COL_SEL     = Color3.fromRGB(80, 80, 130)    -- selected row bg
+
+-- ── helpers ──────────────────────────────────────────────────
+local function _rlRemoteColor(rtype)
+    return (rtype == "event" or rtype == "unreliable") and _RL_COL_EVENT or _RL_COL_REMOTE
+end
+
+local function _rlGenScript(remote, args)
+    -- Light version: generate a runnable FireServer/InvokeServer call string.
+    -- We do not depend on SimpleSpy internals; instead we use GetFullName for path.
+    local ok, path = pcall(function() return remote:GetFullName() end)
+    if not ok then path = "game.???" end
+    local argsStr = ""
+    if args and #args > 0 then
+        local parts = {}
+        for _, v in ipairs(args) do
+            local t = typeof(v)
+            if t == "string" then
+                parts[#parts+1] = string.format("%q", v)
+            elseif t == "number" or t == "boolean" then
+                parts[#parts+1] = tostring(v)
+            elseif t == "Instance" then
+                local ok2, fp = pcall(function() return v:GetFullName() end)
+                parts[#parts+1] = ok2 and ("game."..fp) or "nil --[[Instance]]"
+            elseif t == "Vector3" then
+                parts[#parts+1] = string.format("Vector3.new(%g,%g,%g)", v.X, v.Y, v.Z)
+            elseif t == "CFrame" then
+                local c = {v:GetComponents()}
+                parts[#parts+1] = "CFrame.new("..table.concat(c,",")..")"
+            else
+                parts[#parts+1] = "nil --[["..t.."]]"
+            end
+        end
+        argsStr = table.concat(parts, ", ")
+    end
+    local rClass = pcall(function() return remote.ClassName end) and remote.ClassName or "RemoteEvent"
+    local method = (rClass == "RemoteFunction") and "InvokeServer" or "FireServer"
+    if argsStr == "" then
+        return string.format("game.%s:%s()", path, method)
+    else
+        return string.format("game.%s:%s(%s)", path, method, argsStr)
+    end
+end
+
+-- ── Namecall hook ─────────────────────────────────────────────
+-- Uses hookmetamethod / hookfunction to intercept FireServer / InvokeServer.
+-- Only active when S.rlActive == true.
+local _rlOriginalNamecall = nil
+local _rlHookActive = false
+local _rlHookConn   = nil  -- for cleanup
+
+local function _rlMaybeLog(remote, method, args)
+    if not S.rlActive then return end
+    local rClass = pcall(function() return remote.ClassName end) and remote.ClassName or ""
+    if not (rClass == "RemoteEvent" or rClass == "RemoteFunction" or rClass == "UnreliableRemoteEvent") then return end
+    local name = pcall(function() return remote.Name end) and remote.Name or "???"
+    if _rlBlacklist[name] then return end
+    -- Soft dedup: same remote name within the same second → skip
+    local now = tick()
+    local key = name
+    -- We log anyway, just note repetition frequency; but don't flood for same remote
+    -- Allow max 1 entry per remote name per 0.3s to prevent spam
+    if _rlSeen[key] and (now - _rlSeen[key]) < 0.3 then return end
+    _rlSeen[key] = now
+    local rtype
+    if rClass == "RemoteEvent" then rtype = "event"
+    elseif rClass == "UnreliableRemoteEvent" then rtype = "unreliable"
+    else rtype = "function" end
+    local genScript = _rlGenScript(remote, args)
+    local entry = {name=name, remoteType=rtype, remote=remote, genScript=genScript, args=args, time=now}
+    table.insert(_rlEntries, 1, entry)
+    if #_rlEntries > 200 then table.remove(_rlEntries) end
+    if _rlVisible then
+        task.defer(function()
+            _rlRebuildList()
+        end)
+    end
+end
+
+-- Hook using hookmetamethod or hookfunction (executor-dependent)
+local function _rlEnableHook()
+    if _rlHookActive then return end
+    local ok = pcall(function()
+        local oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" or method == "fireServer"
+            or method == "InvokeServer" or method == "invokeServer" then
+                local ok2, _ = pcall(_rlMaybeLog, self, method, {...})
+            end
+            return _rlOriginalNamecall(self, ...)
+        end))
+        _rlOriginalNamecall = oldNC
+    end)
+    if not ok then
+        -- Fallback: hookfunction on individual remote types
+        pcall(function()
+            local inst = Instance.new("RemoteEvent")
+            local origFire = inst.FireServer
+            hookfunction(origFire, newcclosure(function(self, ...)
+                pcall(_rlMaybeLog, self, "FireServer", {...})
+                return origFire(self, ...)
+            end))
+            inst:Destroy()
+        end)
+    end
+    _rlHookActive = true
+end
+
+local function _rlDisableHook()
+    if not _rlHookActive then return end
+    if _rlOriginalNamecall then
+        pcall(hookmetamethod, game, "__namecall", _rlOriginalNamecall)
+        _rlOriginalNamecall = nil
+    end
+    _rlHookActive = false
+end
+
+-- forward-declare rebuild (used by hook above)
+_rlRebuildList = function() end   -- will be replaced below
+
+-- ── Panel construction ────────────────────────────────────────
+local function _rlCollapseCode()
+    if not _rlExpanded then return end
+    _rlExpanded = false
+    _rlSelected = nil
+    if _rlPanel then
+        TweenService:Create(_rlPanel, TweenInfo.new(0.15), {Size=UDim2.new(0,_RL_W,0,_RL_H)}):Play()
+    end
+    if _rlCodeFrame then _rlCodeFrame.Visible = false end
+    if _rlScroll then _rlScroll.Visible = true end
+end
+
+local function _rlExpandCode(entry)
+    if not _rlPanel then return end
+    _rlSelected = entry
+    _rlExpanded = true
+    TweenService:Create(_rlPanel, TweenInfo.new(0.15), {Size=UDim2.new(0,_RL_EXP_W,0,_RL_EXP_H)}):Play()
+    if _rlScroll then _rlScroll.Visible = false end
+    if _rlCodeFrame then
+        _rlCodeFrame.Visible = true
+        -- Update code display
+        local codeLbl = _rlCodeFrame:FindFirstChild("CodeLbl")
+        if codeLbl then
+            codeLbl.Text = entry.genScript or "-- (no script generated)"
+        end
+        local nameLbl = _rlCodeFrame:FindFirstChild("NameLbl")
+        if nameLbl then
+            nameLbl.Text = entry.name
+            nameLbl.TextColor3 = _rlRemoteColor(entry.remoteType)
+        end
+        local typeLbl = _rlCodeFrame:FindFirstChild("TypeLbl")
+        if typeLbl then
+            local cls = (entry.remoteType == "event") and "RemoteEvent"
+                     or (entry.remoteType == "unreliable") and "UnreliableRemoteEvent"
+                     or "RemoteFunction"
+            typeLbl.Text = cls
+            typeLbl.TextColor3 = _rlRemoteColor(entry.remoteType)
+        end
+    end
+end
+
+-- The live list rebuild
+local _rlRowFrames = {}
+local function _rlRebuildListImpl()
+    if not _rlScroll then return end
+    -- clear old rows
+    for _, f in ipairs(_rlRowFrames) do pcall(function() f:Destroy() end) end
+    _rlRowFrames = {}
+    local shown = math.min(#_rlEntries, 80)
+    for i = 1, shown do
+        local e = _rlEntries[i]
+        local rowCol = _rlRemoteColor(e.remoteType)
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1,-4,0,28)
+        row.BackgroundColor3 = Color3.fromRGB(18,18,26)
+        row.BorderColor3 = rowCol
+        row.BorderSizePixel = 1
+        row.Text = ""; row.ZIndex = 52; row.Parent = _rlScroll
+        local rowStroke = Instance.new("UIStroke", row)
+        rowStroke.Color = rowCol; rowStroke.Thickness = 1.2
+        -- Left color bar
+        local bar = Instance.new("Frame", row)
+        bar.Size = UDim2.new(0,4,1,0); bar.BackgroundColor3 = rowCol; bar.BorderSizePixel = 0; bar.ZIndex = 53
+        -- Name label
+        local nameLbl = Instance.new("TextLabel", row)
+        nameLbl.Size = UDim2.new(1,-50,0,14); nameLbl.Position = UDim2.new(0,8,0,2)
+        nameLbl.BackgroundTransparency = 1; nameLbl.Text = e.name
+        nameLbl.TextColor3 = rowCol; nameLbl.FontFace = FONT_MAIN
+        nameLbl.TextSize = 11; nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd; nameLbl.ZIndex = 53
+        -- Type badge
+        local badge = Instance.new("TextLabel", row)
+        badge.Size = UDim2.new(0,44,0,12); badge.Position = UDim2.new(1,-46,0,2)
+        badge.BackgroundColor3 = Color3.fromRGB(28,28,40); badge.BorderSizePixel = 0
+        badge.Text = (e.remoteType == "event") and "Event" or (e.remoteType == "unreliable") and "URE" or "Func"
+        badge.TextColor3 = rowCol; badge.FontFace = FONT_MAIN
+        badge.TextSize = 9; badge.ZIndex = 54
+        -- Time label
+        local tLbl = Instance.new("TextLabel", row)
+        tLbl.Size = UDim2.new(1,-8,0,10); tLbl.Position = UDim2.new(0,8,0,16)
+        tLbl.BackgroundTransparency = 1
+        local diff = math.floor(tick() - e.time)
+        tLbl.Text = diff < 2 and "just now" or (diff.."s ago")
+        tLbl.TextColor3 = Color3.fromRGB(100,100,120); tLbl.FontFace = FONT_MAIN
+        tLbl.TextSize = 9; tLbl.TextXAlignment = Enum.TextXAlignment.Left; tLbl.ZIndex = 53
+
+        -- Tap to expand
+        do local _e = e
+            row.MouseButton1Click:Connect(function()
+                if _rlExpanded and _rlSelected == _e then
+                    _rlCollapseCode()
+                else
+                    _rlExpandCode(_e)
+                end
+            end)
+        end
+        _rlRowFrames[#_rlRowFrames+1] = row
+    end
+end
+_rlRebuildList = _rlRebuildListImpl  -- satisfy forward decl
+
+-- Auto-refresh rows every 2s while panel is visible
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if _rlVisible and _rlScroll and not _rlExpanded then
+            pcall(_rlRebuildList)
+        end
+    end
+end)
+
+local function _rlBuildPanel()
+    if _rlPanel and _rlPanel.Parent then return end
+    _rlPanel = Instance.new("Frame")
+    _rlPanel.Name = "SigmaRLPanel"
+    _rlPanel.Size = UDim2.new(0,_RL_W,0,_RL_H)
+    _rlPanel.Position = UDim2.new(0.5,-160,0.5,-140)
+    _rlPanel.BackgroundColor3 = Color3.fromRGB(10,10,14)
+    _rlPanel.BorderSizePixel = 0
+    _rlPanel.ZIndex = 50; _rlPanel.Visible = false; _rlPanel.Parent = ScreenGui
+    local pStroke = Instance.new("UIStroke", _rlPanel)
+    pStroke.Color = T.ACCENT; pStroke.Thickness = 1.5
+    onTheme(function(th) pStroke.Color = th.ACCENT end)
+
+    -- Title bar (also drag handle)
+    local tb = Instance.new("Frame", _rlPanel)
+    tb.Name = "TitleBar"
+    tb.Size = UDim2.new(1,0,0,24); tb.BackgroundColor3 = Color3.fromRGB(16,16,20); tb.BorderSizePixel = 0; tb.ZIndex = 51
+    -- Title
+    local tl = Instance.new("TextLabel", tb)
+    tl.Size = UDim2.new(1,-50,1,0); tl.Position = UDim2.new(0,6,0,0)
+    tl.BackgroundTransparency = 1; tl.Text = "Remote Logger"
+    tl.TextColor3 = T.ACCENT; tl.FontFace = FONT_MAIN; tl.TextSize = 11
+    tl.TextXAlignment = Enum.TextXAlignment.Left; tl.ZIndex = 52
+    onTheme(function(th) tl.TextColor3 = th.ACCENT end)
+    -- Back button (collapse code view)
+    local backBtn = Instance.new("TextButton", tb)
+    backBtn.Size = UDim2.new(0,26,0,24); backBtn.Position = UDim2.new(1,-50,0,0)
+    backBtn.BackgroundColor3 = Color3.fromRGB(30,30,40); backBtn.BorderSizePixel = 0
+    backBtn.Text = "\226\134\144"; backBtn.TextColor3 = Color3.fromRGB(180,180,220)
+    backBtn.FontFace = FONT_MAIN; backBtn.TextSize = 13; backBtn.ZIndex = 53
+    backBtn.MouseButton1Click:Connect(_rlCollapseCode)
+    -- Close button
+    local cb = Instance.new("TextButton", tb)
+    cb.Size = UDim2.new(0,24,0,24); cb.Position = UDim2.new(1,-24,0,0)
+    cb.BackgroundColor3 = Color3.fromRGB(60,20,20); cb.BorderSizePixel = 0
+    cb.Text = "\226\156\149"; cb.TextColor3 = Color3.fromRGB(255,80,80)
+    cb.FontFace = FONT_MAIN; cb.TextSize = 11; cb.ZIndex = 53
+    cb.MouseButton1Click:Connect(function()
+        _rlPanel.Visible = false; _rlVisible = false
+        _rlCollapseCode()
+    end)
+
+    -- Header strip (count + clear)
+    local hdr = Instance.new("Frame", _rlPanel)
+    hdr.Size = UDim2.new(1,0,0,18); hdr.Position = UDim2.new(0,0,0,24)
+    hdr.BackgroundColor3 = Color3.fromRGB(14,14,20); hdr.BorderSizePixel = 0; hdr.ZIndex = 51
+    local countLbl = Instance.new("TextLabel", hdr)
+    countLbl.Name = "CountLbl"
+    countLbl.Size = UDim2.new(0.6,0,1,0); countLbl.Position = UDim2.new(0,6,0,0)
+    countLbl.BackgroundTransparency = 1; countLbl.Text = "0 remotes captured"
+    countLbl.TextColor3 = Color3.fromRGB(140,140,160); countLbl.FontFace = FONT_MAIN
+    countLbl.TextSize = 10; countLbl.TextXAlignment = Enum.TextXAlignment.Left; countLbl.ZIndex = 52
+    local clearBtn = Instance.new("TextButton", hdr)
+    clearBtn.Size = UDim2.new(0,60,1,0); clearBtn.Position = UDim2.new(1,-62,0,0)
+    clearBtn.BackgroundColor3 = Color3.fromRGB(28,28,42); clearBtn.BorderSizePixel = 0
+    clearBtn.Text = "Clear"; clearBtn.TextColor3 = Color3.fromRGB(200,100,100)
+    clearBtn.FontFace = FONT_MAIN; clearBtn.TextSize = 10; clearBtn.ZIndex = 52
+    clearBtn.MouseButton1Click:Connect(function()
+        _rlEntries = {}; _rlSeen = {}; _rlCollapseCode(); _rlRebuildList()
+        countLbl.Text = "0 remotes captured"
+    end)
+
+    -- Scroll list (normal view)
+    _rlScroll = Instance.new("ScrollingFrame", _rlPanel)
+    _rlScroll.Name = "RLScroll"
+    _rlScroll.Size = UDim2.new(1,0,1,-42)
+    _rlScroll.Position = UDim2.new(0,0,0,42)
+    _rlScroll.BackgroundTransparency = 1; _rlScroll.BorderSizePixel = 0
+    _rlScroll.ScrollBarThickness = 4; _rlScroll.ScrollBarImageColor3 = T.ACCENT
+    _rlScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    _rlScroll.CanvasSize = UDim2.new(0,0,0,0)
+    _rlScroll.ZIndex = 51; _rlScroll.Visible = true
+    onTheme(function(th) _rlScroll.ScrollBarImageColor3 = th.ACCENT end)
+    local sll = Instance.new("UIListLayout", _rlScroll)
+    sll.Padding = UDim.new(0,3); sll.SortOrder = Enum.SortOrder.LayoutOrder
+    local slp = Instance.new("UIPadding", _rlScroll)
+    slp.PaddingTop = UDim.new(0,3); slp.PaddingLeft = UDim.new(0,2); slp.PaddingRight = UDim.new(0,2)
+
+    -- Code view (expanded state)
+    _rlCodeFrame = Instance.new("Frame", _rlPanel)
+    _rlCodeFrame.Name = "CodeView"
+    _rlCodeFrame.Size = UDim2.new(1,0,1,-42)
+    _rlCodeFrame.Position = UDim2.new(0,0,0,42)
+    _rlCodeFrame.BackgroundColor3 = Color3.fromRGB(8,8,12); _rlCodeFrame.BorderSizePixel = 0
+    _rlCodeFrame.ZIndex = 51; _rlCodeFrame.Visible = false
+    local cvLayout = Instance.new("UIListLayout", _rlCodeFrame)
+    cvLayout.Padding = UDim.new(0,3); cvLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    local cvPad = Instance.new("UIPadding", _rlCodeFrame)
+    cvPad.PaddingTop = UDim.new(0,4); cvPad.PaddingLeft = UDim.new(0,6); cvPad.PaddingRight = UDim.new(0,6)
+    -- Remote name header
+    local nmLbl = Instance.new("TextLabel", _rlCodeFrame)
+    nmLbl.Name = "NameLbl"; nmLbl.Size = UDim2.new(1,0,0,16)
+    nmLbl.BackgroundTransparency = 1; nmLbl.Text = ""
+    nmLbl.FontFace = FONT_MAIN; nmLbl.TextSize = 13; nmLbl.TextXAlignment = Enum.TextXAlignment.Left
+    nmLbl.ZIndex = 52; nmLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    -- Type label
+    local typLbl = Instance.new("TextLabel", _rlCodeFrame)
+    typLbl.Name = "TypeLbl"; typLbl.Size = UDim2.new(1,0,0,12)
+    typLbl.BackgroundTransparency = 1; typLbl.Text = ""
+    typLbl.FontFace = FONT_MAIN; typLbl.TextSize = 10; typLbl.TextXAlignment = Enum.TextXAlignment.Left
+    typLbl.ZIndex = 52
+    -- Code scroll inside expanded view
+    local codeScroll = Instance.new("ScrollingFrame", _rlCodeFrame)
+    codeScroll.Name = "InnerScroll"; codeScroll.Size = UDim2.new(1,0,0,0)
+    codeScroll.AutomaticSize = Enum.AutomaticSize.Y
+    codeScroll.BackgroundColor3 = Color3.fromRGB(12,12,18); codeScroll.BorderSizePixel = 0
+    codeScroll.ScrollBarThickness = 4; codeScroll.ScrollBarImageColor3 = T.ACCENT
+    codeScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    codeScroll.CanvasSize = UDim2.new(0,0,0,0); codeScroll.ZIndex = 52
+    onTheme(function(th) codeScroll.ScrollBarImageColor3 = th.ACCENT end)
+    local codeInner = Instance.new("Frame", codeScroll)
+    codeInner.BackgroundTransparency = 1; codeInner.AutomaticSize = Enum.AutomaticSize.Y
+    codeInner.Size = UDim2.new(1,0,0,0); codeInner.ZIndex = 53
+    local codeLbl = Instance.new("TextLabel", codeInner)
+    codeLbl.Name = "CodeLbl"; codeLbl.Size = UDim2.new(1,-4,0,0)
+    codeLbl.AutomaticSize = Enum.AutomaticSize.Y
+    codeLbl.BackgroundTransparency = 1; codeLbl.Text = ""
+    codeLbl.TextColor3 = Color3.fromRGB(180,220,180); codeLbl.FontFace = FONT_MAIN
+    codeLbl.TextSize = 11; codeLbl.TextXAlignment = Enum.TextXAlignment.Left
+    codeLbl.TextWrapped = true; codeLbl.ZIndex = 53
+    -- Action buttons row
+    local actRow = Instance.new("Frame", _rlCodeFrame)
+    actRow.Name = "ActRow"; actRow.Size = UDim2.new(1,0,0,24)
+    actRow.BackgroundTransparency = 1; actRow.ZIndex = 52
+    local actLayout = Instance.new("UIListLayout", actRow)
+    actLayout.FillDirection = Enum.FillDirection.Horizontal; actLayout.Padding = UDim.new(0,4)
+    -- Copy Code btn
+    local cpBtn = Instance.new("TextButton", actRow)
+    cpBtn.Size = UDim2.new(0,80,1,0)
+    cpBtn.BackgroundColor3 = Color3.fromRGB(30,40,60); cpBtn.BorderSizePixel = 0
+    cpBtn.Text = "\240\159\223\213 Copy"; cpBtn.TextColor3 = T.WHITE
+    cpBtn.FontFace = FONT_MAIN; cpBtn.TextSize = 10; cpBtn.ZIndex = 53
+    onTheme(function(th) cpBtn.TextColor3 = th.WHITE end)
+    cpBtn.MouseButton1Click:Connect(function()
+        if _rlSelected then
+            local clip = setclipboard or (Synapse and function(s) Synapse:Copy(s) end) or nil
+            if clip then pcall(clip, _rlSelected.genScript) end
+            cpBtn.Text = "\226\156\147 Copied"
+            task.delay(1.5, function() if cpBtn and cpBtn.Parent then cpBtn.Text = "\240\159\223\213 Copy" end end)
+        end
+    end)
+    -- Run Code btn
+    local runBtn = Instance.new("TextButton", actRow)
+    runBtn.Size = UDim2.new(0,72,1,0)
+    runBtn.BackgroundColor3 = Color3.fromRGB(20,50,30); runBtn.BorderSizePixel = 0
+    runBtn.Text = "\226\150\182 Run"; runBtn.TextColor3 = Color3.fromRGB(120,220,120)
+    runBtn.FontFace = FONT_MAIN; runBtn.TextSize = 10; runBtn.ZIndex = 53
+    runBtn.MouseButton1Click:Connect(function()
+        if _rlSelected then
+            local e = _rlSelected
+            local ok, err = pcall(function()
+                local r = e.remote
+                if r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") then
+                    r:FireServer(table.unpack(e.args or {}))
+                elseif r:IsA("RemoteFunction") then
+                    r:InvokeServer(table.unpack(e.args or {}))
+                end
+            end)
+            runBtn.Text = ok and "\226\156\147 Fired!" or "\226\156\151 Err"
+            task.delay(1.5, function() if runBtn and runBtn.Parent then runBtn.Text = "\226\150\182 Run" end end)
+            if not ok then notify("Remote Logger", "Run error: "..tostring(err)) end
+        end
+    end)
+    -- Exclude btn
+    local exBtn = Instance.new("TextButton", actRow)
+    exBtn.Size = UDim2.new(0,70,1,0)
+    exBtn.BackgroundColor3 = Color3.fromRGB(50,25,10); exBtn.BorderSizePixel = 0
+    exBtn.Text = "\240\159\232\171 Exclude"; exBtn.TextColor3 = Color3.fromRGB(220,140,60)
+    exBtn.FontFace = FONT_MAIN; exBtn.TextSize = 10; exBtn.ZIndex = 53
+    exBtn.MouseButton1Click:Connect(function()
+        if _rlSelected then
+            _rlBlacklist[_rlSelected.name] = true
+            notify("Remote Logger", "Excluded: ".._rlSelected.name)
+            _rlCollapseCode()
+        end
+    end)
+
+    -- Count updater
+    task.spawn(function()
+        while _rlPanel and _rlPanel.Parent do
+            task.wait(2)
+            if countLbl and countLbl.Parent then
+                countLbl.Text = #_rlEntries.." remote"..(#_rlEntries ~= 1 and "s" or "").." captured"
+            end
+        end
+    end)
+
+    -- Drag (via title bar)
+    do
+        local dragStart, panStart
+        tb.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragStart = i.Position; panStart = _rlPanel.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(i)
+            if dragStart and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - dragStart
+                _rlPanel.Position = UDim2.new(panStart.X.Scale, panStart.X.Offset+d.X, panStart.Y.Scale, panStart.Y.Offset+d.Y)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragStart = nil
+            end
+        end)
+    end
+end
+
+-- ── Remote Logger bubble (R) ──────────────────────────────────
+local _rlBubble = Instance.new("TextButton")
+_rlBubble.Name = "RemoteLoggerBubble"
+_rlBubble.Size = UDim2.new(0,26,0,26)
+_rlBubble.Position = UDim2.new(0.5,-13,0,110)  -- below D bubble
+_rlBubble.BackgroundColor3 = Color3.fromRGB(12,12,12)
+_rlBubble.Text = ""; _rlBubble.ZIndex = 15; _rlBubble.Visible = false; _rlBubble.Parent = ScreenGui
+local _rlBubStroke = Instance.new("UIStroke", _rlBubble)
+_rlBubStroke.Color = Color3.fromRGB(255,90,60); _rlBubStroke.Thickness = 1.5
+TweenService:Create(_rlBubStroke, TweenInfo.new(1,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true), {Thickness=2.5}):Play()
+local _rlBubLbl = Instance.new("TextLabel", _rlBubble)
+_rlBubLbl.Size = UDim2.new(1,0,1,0); _rlBubLbl.BackgroundTransparency = 1
+_rlBubLbl.Text = "R"; _rlBubLbl.TextColor3 = Color3.fromRGB(255,90,60)
+_rlBubLbl.FontFace = FONT_MAIN; _rlBubLbl.TextSize = 11; _rlBubLbl.ZIndex = 16
+-- Bubble drag
+do
+    local _rlBubDragStart, _rlBubPanStart
+    _rlBubble.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            _rlBubDragStart = i.Position; _rlBubPanStart = _rlBubble.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if _rlBubDragStart and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - _rlBubDragStart
+            _rlBubble.Position = UDim2.new(_rlBubPanStart.X.Scale, _rlBubPanStart.X.Offset+d.X, _rlBubPanStart.Y.Scale, _rlBubPanStart.Y.Offset+d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            local moved = _rlBubDragStart and (i.Position - _rlBubDragStart).Magnitude < 6
+            _rlBubDragStart = nil
+            if moved then
+                _rlBuildPanel()
+                _rlVisible = not _rlVisible
+                _rlPanel.Visible = _rlVisible
+                if _rlVisible then _rlRebuildList() end
+                _rlBubStroke.Color = _rlVisible and T.ACCENT or Color3.fromRGB(255,90,60)
+                _rlBubLbl.TextColor3 = _rlBubStroke.Color
+            end
+        end
+    end)
+end
+
+-- ── Loop Code thread ──────────────────────────────────────────
+local function _rlStartLoop()
+    if _rlLoopThread then return end
+    _rlLoopThread = task.spawn(function()
+        while _rlLoopOn do
+            if _rlSelected then
+                local e = _rlSelected
+                pcall(function()
+                    local r = e.remote
+                    if r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") then
+                        r:FireServer(table.unpack(e.args or {}))
+                    elseif r:IsA("RemoteFunction") then
+                        r:InvokeServer(table.unpack(e.args or {}))
+                    end
+                end)
+            end
+            task.wait(math.max(0.05, _rlLoopDelay))
+        end
+        _rlLoopThread = nil
+    end)
+end
+
+local function _rlStopLoop()
+    _rlLoopOn = false
+    if _rlLoopThread then
+        task.cancel(_rlLoopThread)
+        _rlLoopThread = nil
+    end
+end
+
+-- ── Game subtab UI ────────────────────────────────────────────
+do -- ╔═ GAME SUBTAB UI ══╗
+
+makeSection(gamePage, "Remote Logger")
+
+local g1 = makeGroup(gamePage, "Deploy Remote Logger",
+    "Hooks FireServer/InvokeServer to log all remotes fired while active. Yellow = RemoteEvent, Orange = RemoteFunction. Tap an entry to expand and see the generated call code.")
+
+makeButton(g1, "Deploy / Toggle Remote Logger", function()
+    -- Toggle the hook on/off
+    if not S.rlActive then
+        S.rlActive = true
+        _rlEnableHook()
+        _rlBuildPanel()
+        _rlVisible = true; _rlPanel.Visible = true
+        _rlBubble.Visible = true
+        _rlBubStroke.Color = T.ACCENT
+        _rlBubLbl.TextColor3 = T.ACCENT
+        _rlRebuildList()
+        notify("Remote Logger", "Deployed. Logging remotes...")
+    else
+        S.rlActive = false
+        _rlDisableHook()
+        _rlStopLoop()
+        if _rlPanel then _rlPanel.Visible = false end
+        _rlBubble.Visible = false
+        _rlVisible = false
+        _rlBubStroke.Color = Color3.fromRGB(255,90,60)
+        _rlBubLbl.TextColor3 = _rlBubStroke.Color
+        notify("Remote Logger", "Stopped. Hook removed.")
+    end
+end)
+
+makeToggle(g1, "Auto-start on Deploy", function(on)
+    S.rlAutoStart = on
+end)
+
+makeSection(gamePage, "Loop Code")
+
+local g2 = makeGroup(gamePage, "Loop Selected Remote",
+    "Repeatedly fires the currently selected remote (from the Logger panel) at the interval below. Select a remote first by tapping it in the Logger, then enable Loop Code.")
+
+local _loopTogRow, _loopTickRef
+_loopTogRow, _loopTickRef = makeToggle(g2, "Loop Code", function(on)
+    _rlLoopOn = on
+    if on then
+        if not _rlSelected then
+            notify("Remote Logger", "Select a remote in the Logger first.")
+            -- revert
+            task.defer(function()
+                if _loopTickRef and _loopTickRef.Parent then
+                    _loopTickRef.BackgroundColor3 = Color3.new(0,0,0)
+                end
+                _rlLoopOn = false
+            end)
+            return
+        end
+        _rlStartLoop()
+        notify("Remote Logger", "Loop started: ".._rlSelected.name)
+    else
+        _rlStopLoop()
+        notify("Remote Logger", "Loop stopped.")
+    end
+end)
+
+makeInput(g2, "Interval (s)", tostring(_rlLoopDelay), function(val)
+    local n = tonumber(val)
+    if n and n >= 0.05 then
+        _rlLoopDelay = n
+        notify("Remote Logger", "Loop interval: "..n.."s")
+    end
+end)
+
+makeSection(gamePage, "Controls")
+
+local g3 = makeGroup(gamePage, "Blacklist / Block",
+    "Exclude: ignores that remote name going forward. Block: same name is excluded AND future FireServer calls for it are dropped (if hook supports it).")
+
+makeButton(g3, "Exclude Selected", function()
+    if _rlSelected then
+        _rlBlacklist[_rlSelected.name] = true
+        notify("Remote Logger", "Excluded: ".._rlSelected.name)
+    else
+        notify("Remote Logger", "No remote selected in Logger.")
+    end
+end)
+
+makeButton(g3, "Block Selected (drop fires)", function()
+    if _rlSelected then
+        _rlBlacklist[_rlSelected.name] = true
+        _rlBlocklist[_rlSelected.name] = true
+        notify("Remote Logger", "Blocked: ".._rlSelected.name)
+    else
+        notify("Remote Logger", "No remote selected in Logger.")
+    end
+end)
+
+makeButton(g3, "Clear Blacklist", function()
+    _rlBlacklist = {}; _rlBlocklist = {}
+    notify("Remote Logger", "Blacklist & blocklist cleared.")
+end)
+
+makeButton(g3, "Clear Log", function()
+    _rlEntries = {}; _rlSeen = {}
+    _rlCollapseCode()
+    _rlRebuildList()
+    notify("Remote Logger", "Log cleared.")
+end)
+
+makeSection(gamePage, "Simple Spy V3")
+
+local g4 = makeGroup(gamePage, "Launch Simple Spy V3",
+    "Loads Simple Spy V3 for a full-featured remote spy with decompilation, blocking, exclusion, and function info. Runs separately alongside the Remote Logger.")
+makeButton(g4, "Load Simple Spy V3", function(btn)
+    btn.Text = "Loading..."
+    task.spawn(function()
+        local ok = pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/infyiff/backup/main/SimpleSpyV3/main.lua"))()
+        end)
+        btn.Text = ok and "Loaded!" or "Failed"
+        task.wait(3); btn.Text = "Load Simple Spy V3"
+    end)
+end)
+
+end -- ╚═ GAME SUBTAB UI ══╝
+end -- ╚═ GAME TAB SCOPE ══╝
+
 -- ── TAB: SCRIPTS ─────────────────────────────────────────────
--- scriptsPage: sub-tab inside "Target" big tab (declared at top with makeSubTabBar)
+-- scriptsPage: sub-tab inside "Scripts" big tab (moved from Target, declared at top)
 
 do
     local SCRIPTS={
