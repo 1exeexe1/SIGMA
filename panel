@@ -1262,7 +1262,8 @@ S = {
     boomboxESP        = false,   -- highlight players/clones holding a boombox
     boomboxAudioHUD   = false,   -- BillboardGui above head: ID · duration · name
     boomboxClickCopy  = false,   -- click-to-select mode
-    boomboxOnly       = true,    -- restrict to boombox tools only (false = all sounds)
+    boomboxOnly       = true,    -- legacy compat (mirrors boomboxScanMode=="boombox")
+    boomboxScanMode   = "boombox", -- "boombox" | "universal" | "all"
     _boomboxSelBoxes  = {},      -- [char] = SelectionBox
     _boomboxBillboards= {},      -- [char] = BillboardGui
     _boomboxMuted     = {},      -- [char] = bool
@@ -17013,16 +17014,142 @@ local function _bbGetSoundBoomboxOnly(char)
     return nil
 end
 
+-- ── Universal scanner helpers ─────────────────────────────────────────────
+
+-- True when a SoundId string encodes a user-uploaded asset (5+ digit numeric ID).
+-- This filters out Roblox's built-in engine sounds (rbxasset:// etc).
+local function _bbIsUserAudioId(soundId)
+    local n = tostring(soundId):match("%d+")
+    return n ~= nil and #n >= 5
+end
+
+-- Multi-strategy boombox detector.  Searches from highest to lowest confidence:
+--   1. Tool named "boombox*" inside the model          → kind = "named-tool"
+--   2. workspace[playerName].BoomboxSoundPart.BoomBoxSound  → kind = "ws-path"
+--   3. Any other workspace[playerName] descendant Sound → kind = "ws-broad"
+--   4. Any Tool descendant Sound with 5+ digit ID      → kind = "any-tool"
+--   5. Boombox-keyword named ancestor in model tree    → kind = "keyword"
+--   6. Any playing Sound with 5+ digit ID in model     → kind = "broad"
+-- Returns: Sound|nil, kind|nil
+local _BB_KEYWORDS = {"boombox","radio","music","audio","jukebox","speaker","soundpart"}
+local function _bbGetSoundUniversal(model, playerName)
+    -- 1. Named-tool (same as strict mode)
+    for _, tool in ipairs(model:GetDescendants()) do
+        if tool:IsA("Tool") and tool.Name:lower():find("boombox") then
+            for _, snd in ipairs(tool:GetDescendants()) do
+                if snd:IsA("Sound") and snd.Playing
+                and _bbIsUserAudioId(snd.SoundId) and not _BB_IGNORE[snd.SoundId] then
+                    return snd, "named-tool"
+                end
+            end
+        end
+    end
+    -- 2 & 3. workspace[playerName] subtree
+    if playerName then
+        local wsNode = Workspace:FindFirstChild(playerName)
+        if wsNode then
+            -- 2. Specific known path: BoomboxSoundPart.BoomBoxSound
+            local bsp = wsNode:FindFirstChild("BoomboxSoundPart")
+            if bsp then
+                local bbs = bsp:FindFirstChild("BoomBoxSound")
+                if bbs and bbs:IsA("Sound") and bbs.Playing
+                and _bbIsUserAudioId(bbs.SoundId) and not _BB_IGNORE[bbs.SoundId] then
+                    return bbs, "ws-path"
+                end
+            end
+            -- 3. Broad workspace[playerName] scan
+            for _, snd in ipairs(wsNode:GetDescendants()) do
+                if snd:IsA("Sound") and snd.Playing
+                and _bbIsUserAudioId(snd.SoundId) and not _BB_IGNORE[snd.SoundId] then
+                    return snd, "ws-broad"
+                end
+            end
+        end
+    end
+    -- 4. Any Tool in model with a qualifying Sound
+    for _, tool in ipairs(model:GetDescendants()) do
+        if tool:IsA("Tool") then
+            for _, snd in ipairs(tool:GetDescendants()) do
+                if snd:IsA("Sound") and snd.Playing
+                and _bbIsUserAudioId(snd.SoundId) and not _BB_IGNORE[snd.SoundId] then
+                    return snd, "any-tool"
+                end
+            end
+        end
+    end
+    -- 5. Any boombox-keyword-named container in model
+    for _, obj in ipairs(model:GetDescendants()) do
+        local lname = obj.Name:lower()
+        local isKW = false
+        for _, kw in ipairs(_BB_KEYWORDS) do
+            if lname:find(kw, 1, true) then isKW = true; break end
+        end
+        if isKW then
+            if obj:IsA("Sound") and obj.Playing
+            and _bbIsUserAudioId(obj.SoundId) and not _BB_IGNORE[obj.SoundId] then
+                return obj, "keyword"
+            end
+            for _, snd in ipairs(obj:GetDescendants()) do
+                if snd:IsA("Sound") and snd.Playing
+                and _bbIsUserAudioId(snd.SoundId) and not _BB_IGNORE[snd.SoundId] then
+                    return snd, "keyword"
+                end
+            end
+        end
+    end
+    -- 6. Broadest fallback: any 5+ digit Sound anywhere in model
+    for _, snd in ipairs(model:GetDescendants()) do
+        if snd:IsA("Sound") and snd.Playing
+        and _bbIsUserAudioId(snd.SoundId) and not _BB_IGNORE[snd.SoundId] then
+            return snd, "broad"
+        end
+    end
+    return nil, nil
+end
+
+-- Resolves the Roblox player name that "owns" a character model or clone.
+local function _bbResolvePlayerName(model)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character == model then return plr.Name end
+    end
+    local clonesFolder = Workspace:FindFirstChild("Clones")
+    if clonesFolder then
+        for _, userFolder in ipairs(clonesFolder:GetChildren()) do
+            for _, child in ipairs(userFolder:GetChildren()) do
+                if child == model then return userFolder.Name end
+            end
+        end
+    end
+    return model.Name  -- best-effort fallback
+end
+
+-- Central dispatcher: picks the right getter based on S.boomboxScanMode.
+-- Pass the model (character / clone) and optionally a pre-known playerName.
+local function _bbGetSoundForMode(model, playerName)
+    if S.boomboxScanMode == "boombox" then
+        return _bbGetSoundBoomboxOnly(model)
+    elseif S.boomboxScanMode == "universal" then
+        return (_bbGetSoundUniversal(model, playerName or _bbResolvePlayerName(model)))
+    else  -- "all"
+        return _bbGetSound(model)
+    end
+end
+
 local function _bbScan()
     local results = {}
     local counted = {}   -- set of Model objects already added
 
-    local function tryAdd(model, labelStr, ownerStr)
+    local function tryAdd(model, labelStr, ownerStr, playerName)
         if counted[model] then return end
         local snd, isBoombox
-        if S.boomboxOnly then
+        if S.boomboxScanMode == "boombox" then
             snd = _bbGetSoundBoomboxOnly(model)
-            isBoombox = true
+            isBoombox = snd ~= nil
+        elseif S.boomboxScanMode == "universal" then
+            local kind
+            snd, kind = _bbGetSoundUniversal(model, playerName)
+            -- Everything found by universal scan is treated as boombox for ESP tinting
+            isBoombox = kind ~= nil
         else
             -- Permissive: any non-ignored playing sound
             snd = _bbGetSound(model)
@@ -17046,7 +17173,7 @@ local function _bbScan()
     -- 1. Player characters
     for _, plr in ipairs(Players:GetPlayers()) do
         local char = plr.Character
-        if char then tryAdd(char, plr.Name, plr.Name) end
+        if char then tryAdd(char, plr.Name, plr.Name, plr.Name) end
     end
 
     -- 2. workspace.Clones[username]  -  iterate ALL Model children, not just
@@ -17057,7 +17184,7 @@ local function _bbScan()
             local ownerName = userFolder.Name
             for _, child in ipairs(userFolder:GetChildren()) do
                 if child:IsA("Model") then
-                    tryAdd(child, "[Clone] "..ownerName, ownerName)
+                    tryAdd(child, "[Clone] "..ownerName, ownerName, ownerName)
                 end
             end
         end
@@ -17315,7 +17442,7 @@ local _bbSelLbl = nil   -- forward ref; set after UI is built
 local function _bbGetSelectedSound()
     local char = S._boomboxSelected
     if not char then return nil, nil end
-    local snd = _bbGetSound(char)
+    local snd = _bbGetSoundForMode(char)
     local id  = snd and (_bbGetId(snd) or "?") or nil
     return snd, id
 end
@@ -17367,7 +17494,7 @@ local function _bbAttachClick()
         for _, plr in ipairs(Players:GetPlayers()) do
             local char = plr.Character
             if char and target:IsDescendantOf(char) then
-                local snd = S.boomboxOnly and _bbGetSoundBoomboxOnly(char) or _bbGetSound(char)
+                local snd = _bbGetSoundForMode(char, plr.Name)
                 if snd then matched = char end
                 break
             end
@@ -17379,7 +17506,7 @@ local function _bbAttachClick()
                 for _, userFolder in ipairs(clonesFolder:GetChildren()) do
                     for _, child in ipairs(userFolder:GetChildren()) do
                         if child:IsA("Model") and target:IsDescendantOf(child) then
-                            local snd = S.boomboxOnly and _bbGetSoundBoomboxOnly(child) or _bbGetSound(child)
+                            local snd = _bbGetSoundForMode(child, userFolder.Name)
                             if snd then matched = child end
                             break
                         end
@@ -17391,7 +17518,7 @@ local function _bbAttachClick()
 
         if not matched then return end
         _bbSetSelected(matched)
-        local snd = S.boomboxOnly and _bbGetSoundBoomboxOnly(matched) or _bbGetSound(matched)
+        local snd = _bbGetSoundForMode(matched)
         local id = snd and (_bbGetId(snd) or "?") or "?"
         notify("Boombox", "Selected: "..matched.Name.." · "..id)
     end)
@@ -17402,11 +17529,21 @@ do
     local g = makeGroup(boomboxPage, "Boombox ESP",
         "Detects players & clones playing audio. Clones scanned from workspace.Clones.")
 
-    makeToggle(g, "Boombox Tools Only", function(on)
-        S.boomboxOnly = on
-        _bbClearAll()  -- force rescan with new filter
-    end, true,
-    "ON = boombox tools only. OFF = all sounds (swords, gears, etc.). Amber = restricted, gray = all.")
+    makeDropdown(g, "Scan Mode",
+        {"Boombox Tools Only", "Universal Scan", "All Audio"},
+        "Boombox Tools Only",
+        function(v)
+            if     v == "Boombox Tools Only" then S.boomboxScanMode = "boombox"
+            elseif v == "Universal Scan"     then S.boomboxScanMode = "universal"
+            else                                  S.boomboxScanMode = "all"
+            end
+            S.boomboxOnly = (S.boomboxScanMode == "boombox")  -- keep legacy compat
+            _bbClearAll()
+        end,
+        "Boombox Tools Only = strict (tool name must contain 'boombox'). "..
+        "Universal Scan = searches player chars + workspace[name] paths + any Tool "..
+        "+ boombox-keyword containers + any 5-digit Sound ID — catches non-standard boomboxes. "..
+        "All Audio = every non-engine sound (swords, gears, etc.).")
 
     makeToggle(g, "Boombox ESP", function(on)
         S.boomboxESP = on
@@ -17464,7 +17601,7 @@ do
     makeButton(g, "Toggle Mute  -  Selected", function()
         local char = S._boomboxSelected
         if not char then notify("Boombox", "Nothing selected."); return end
-        local snd = _bbGetSound(char)
+        local snd = _bbGetSoundForMode(char)
         if not snd then notify("Boombox", "No active sound found."); return end
         local muted = not (S._boomboxMuted[char] or false)
         S._boomboxMuted[char] = muted
@@ -18990,7 +19127,7 @@ local function sigmaSaveSettings()
             espEnlighten=S.espEnlighten, espGriefer=S.espGriefer,
             espInvisible=S.espInvisible,
             boomboxESP=S.boomboxESP, boomboxAudioHUD=S.boomboxAudioHUD,
-            boomboxOnly=S.boomboxOnly, boomboxAutoMute=S.boomboxAutoMute,
+            boomboxOnly=S.boomboxOnly, boomboxScanMode=S.boomboxScanMode, boomboxAutoMute=S.boomboxAutoMute,
             -- Target
             targetHighlight=S.targetHighlight, targetUnanchor=S.targetUnanchor,
             targetDelcubes=S.targetDelcubes, targetOthers=S.targetOthers,
@@ -19084,10 +19221,17 @@ local function sigmaLoadSettings()
         if type(d.espEnlighten)=="boolean" then S.espEnlighten=d.espEnlighten end
         if type(d.espGriefer)=="boolean" then S.espGriefer=d.espGriefer end
         if type(d.espInvisible)=="boolean" then S.espInvisible=d.espInvisible end
-        if type(d.boomboxESP)=="boolean" then S.boomboxESP=d.boomboxESP end
-        if type(d.boomboxAudioHUD)=="boolean" then S.boomboxAudioHUD=d.boomboxAudioHUD end
-        if type(d.boomboxOnly)=="boolean" then S.boomboxOnly=d.boomboxOnly end
-        if type(d.boomboxAutoMute)=="boolean" then S.boomboxAutoMute=d.boomboxAutoMute end
+        if type(d.boomboxESP)==      "boolean" then S.boomboxESP=d.boomboxESP end
+        if type(d.boomboxAudioHUD)== "boolean" then S.boomboxAudioHUD=d.boomboxAudioHUD end
+        if type(d.boomboxOnly)==     "boolean" then S.boomboxOnly=d.boomboxOnly end
+        -- Load scan mode; gracefully migrate old saves that only had boomboxOnly
+        if type(d.boomboxScanMode)=="string"
+        and (d.boomboxScanMode=="boombox" or d.boomboxScanMode=="universal" or d.boomboxScanMode=="all") then
+            S.boomboxScanMode = d.boomboxScanMode
+        elseif type(d.boomboxOnly)=="boolean" then
+            S.boomboxScanMode = d.boomboxOnly and "boombox" or "all"
+        end
+        if type(d.boomboxAutoMute)== "boolean" then S.boomboxAutoMute=d.boomboxAutoMute end
         -- Target
         if type(d.targetHighlight)=="boolean" then S.targetHighlight=d.targetHighlight end
         if type(d.targetUnanchor)=="boolean" then S.targetUnanchor=d.targetUnanchor end
